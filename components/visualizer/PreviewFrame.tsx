@@ -12,19 +12,18 @@ export default function PreviewFrame({
   error,
 }: PreviewFrameProps) {
   return (
-    <div className="w-full h-[500px] md:h-[600px] lg:h-[700px] rounded-xl overflow-hidden">
-      <div
-        className="absolute inset-0 w-full h-full"
-        style={{
-          background: "var(--bg-card)",
-          border: "1px solid var(--border)",
-          borderRadius: "12px",
-          boxShadow: "0 20px 40px rgba(0,0,0,0.3)",
-        }}
-      />
-
+    <div
+      className="w-full h-full rounded-xl overflow-hidden relative"
+      style={{
+        background: "var(--bg-card)",
+        border: "1px solid var(--border)",
+        borderRadius: "12px",
+        boxShadow: "0 20px 40px rgba(0,0,0,0.3)",
+        minHeight: "400px",
+      }}
+    >
       {loading ? (
-        <div className="relative z-10 flex flex-col items-center justify-center h-full text-center p-8">
+        <div className="flex flex-col items-center justify-center h-full text-center p-8">
           <div
             className="w-16 h-16 rounded-full border-4 border-t-transparent animate-spin mb-6"
             style={{ borderColor: "var(--accent)" }}
@@ -43,7 +42,7 @@ export default function PreviewFrame({
           </p>
         </div>
       ) : error ? (
-        <div className="relative z-10 flex items-center justify-center h-full p-8">
+        <div className="flex items-center justify-center h-full p-8">
           <div
             className="glass p-8 text-center max-w-md"
             style={{ borderRadius: "12px" }}
@@ -76,16 +75,18 @@ export default function PreviewFrame({
       ) : html ? (
         <iframe
           srcDoc={html}
-          className="w-full h-full border-0"
+          className="w-full border-0"
           sandbox="allow-scripts allow-same-origin"
           title="Algorithm Visualization"
           style={{
-            background: "var(--bg-primary)",
+            height: "100%",
+            minHeight: "500px",
+            background: "#0d1117",
             borderRadius: "12px",
           }}
         />
       ) : (
-        <div className="relative z-10 flex items-center justify-center h-full p-8 text-center">
+        <div className="flex items-center justify-center h-full p-8 text-center">
           <div className="max-w-md">
             <div className="text-6xl mb-6 opacity-20">🎬</div>
             <h3
@@ -104,7 +105,7 @@ export default function PreviewFrame({
               Your generated animation will appear here once processing is complete.
             </p>
             <div
-              className="text-xs px-4 py-2 rounded-full"
+              className="text-xs px-4 py-2 rounded-full inline-block"
               style={{
                 background: "rgba(99, 179, 237, 0.1)",
                 border: "1px solid rgba(99, 179, 237, 0.2)",

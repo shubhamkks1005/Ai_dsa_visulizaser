@@ -1,11 +1,7 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { GoogleGenAI } from "@google/genai";
 import Groq from "groq-sdk";
 import { AnalysisResult } from "@/types";
 import { buildAnalyzerPrompt } from "@/lib/ai/prompts";
-
-// ═══════════════════════════════════════
-// PRIMARY: Google Gemini 2.0 Flash
-// ═══════════════════════════════════════
 
 async function analyzeWithGemini(
   code: string,
@@ -14,32 +10,54 @@ async function analyzeWithGemini(
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY not set");
 
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+  const ai = new GoogleGenAI({ apiKey });
+
+  const models = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+  ];
 
   const prompt = buildAnalyzerPrompt(code, language);
+  let lastError: Error | null = null;
 
-  const result = await model.generateContent(prompt);
-  const response = result.response;
-  const text = response.text();
+  for (const modelName of models) {
+    try {
+      console.log(`[Analyzer] Trying Gemini model: ${modelName}...`);
 
-  // Extract JSON from response (handle markdown code fences)
-  const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const jsonString = jsonMatch ? jsonMatch[1].trim() : text.trim();
+      const response = await ai.models.generateContent({
+        model: modelName,
+        contents: prompt,
+      });
 
-  const analysis: AnalysisResult = JSON.parse(jsonString);
+      const text = response.text;
+      if (!text) throw new Error("Empty response");
 
-  // Validate required fields
-  if (!analysis.algorithmName || !analysis.steps || analysis.steps.length === 0) {
-    throw new Error("Invalid analysis: missing required fields");
+      const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+      const jsonString = jsonMatch ? jsonMatch[1].trim() : text.trim();
+
+      const analysis: AnalysisResult = JSON.parse(jsonString);
+
+      if (
+        !analysis.algorithmName ||
+        !analysis.steps ||
+        analysis.steps.length === 0
+      ) {
+        throw new Error("Invalid analysis: missing required fields");
+      }
+
+      console.log(`[Analyzer] ✅ Gemini ${modelName} succeeded`);
+      return analysis;
+    } catch (error) {
+      console.log(`[Analyzer] ❌ Gemini ${modelName} failed:`, error);
+      lastError =
+        error instanceof Error ? error : new Error(String(error));
+    }
   }
 
-  return analysis;
+  throw lastError || new Error("All Gemini models failed");
 }
-
-// ═══════════════════════════════════════
-// FALLBACK: Groq Llama 3.1 70B
-// ═══════════════════════════════════════
 
 async function analyzeWithGroq(
   code: string,
@@ -49,11 +67,10 @@ async function analyzeWithGroq(
   if (!apiKey) throw new Error("GROQ_API_KEY not set");
 
   const groq = new Groq({ apiKey });
-
   const prompt = buildAnalyzerPrompt(code, language);
 
   const completion = await groq.chat.completions.create({
-    model: "llama-3.1-70b-versatile",
+    model: "llama-3.3-70b-versatile",
     messages: [
       {
         role: "system",
@@ -75,34 +92,33 @@ async function analyzeWithGroq(
 
   const analysis: AnalysisResult = JSON.parse(text);
 
-  if (!analysis.algorithmName || !analysis.steps || analysis.steps.length === 0) {
+  if (
+    !analysis.algorithmName ||
+    !analysis.steps ||
+    analysis.steps.length === 0
+  ) {
     throw new Error("Invalid analysis: missing required fields");
   }
 
   return analysis;
 }
 
-// ═══════════════════════════════════════
-// MAIN EXPORT — with fallback chain
-// ═══════════════════════════════════════
-
 export async function analyzeCode(
   code: string,
   language: string
 ): Promise<AnalysisResult> {
-  // Try 1: Gemini 2.0 Flash
+  // Try 1: Gemini
   try {
-    console.log("[Analyzer] Trying Gemini 2.0 Flash...");
+    console.log("[Analyzer] Trying Gemini...");
     const result = await analyzeWithGemini(code, language);
-    console.log("[Analyzer] ✅ Gemini succeeded");
     return result;
   } catch (error) {
-    console.error("[Analyzer] ❌ Gemini failed:", error);
+    console.error("[Analyzer] ❌ All Gemini models failed:", error);
   }
 
-  // Try 2: Groq Llama 3.1 70B
+  // Try 2: Groq
   try {
-    console.log("[Analyzer] Trying Groq Llama 3.1 70B...");
+    console.log("[Analyzer] Trying Groq Llama 3.3 70B...");
     const result = await analyzeWithGroq(code, language);
     console.log("[Analyzer] ✅ Groq succeeded");
     return result;
@@ -110,7 +126,6 @@ export async function analyzeCode(
     console.error("[Analyzer] ❌ Groq failed:", error);
   }
 
-  // All failed
   throw new Error(
     "All analyzer models failed. Please check your API keys and try again."
   );
