@@ -26,7 +26,9 @@ export default function HistoryCard({
       });
 
       if (res.ok) {
+       if (item._id) {
         onDelete(item._id);
+}
       }
     } catch {
       alert("Failed to delete. Please try again.");
