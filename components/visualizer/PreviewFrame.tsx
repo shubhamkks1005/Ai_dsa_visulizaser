@@ -13,17 +13,18 @@ export default function PreviewFrame({
 }: PreviewFrameProps) {
   return (
     <div
-      className="w-full h-full rounded-xl overflow-hidden relative"
+      className="w-full h-full min-h-0 rounded-xl relative"
       style={{
         background: "var(--bg-card)",
         border: "1px solid var(--border)",
         borderRadius: "12px",
         boxShadow: "0 20px 40px rgba(0,0,0,0.3)",
         minHeight: "400px",
+        overflow: "hidden",
       }}
     >
       {loading ? (
-        <div className="flex flex-col items-center justify-center h-full text-center p-8">
+        <div className="absolute inset-0 flex flex-col items-center justify-center text-center p-8">
           <div
             className="w-16 h-16 rounded-full border-4 border-t-transparent animate-spin mb-6"
             style={{ borderColor: "var(--accent)" }}
@@ -42,7 +43,7 @@ export default function PreviewFrame({
           </p>
         </div>
       ) : error ? (
-        <div className="flex items-center justify-center h-full p-8">
+        <div className="absolute inset-0 flex items-center justify-center p-8">
           <div
             className="glass p-8 text-center max-w-md"
             style={{ borderRadius: "12px" }}
@@ -75,18 +76,16 @@ export default function PreviewFrame({
       ) : html ? (
         <iframe
           srcDoc={html}
-          className="w-full border-0"
+          className="absolute inset-0 w-full h-full border-0 block"
           sandbox="allow-scripts allow-same-origin"
           title="Algorithm Visualization"
           style={{
-            height: "100%",
-            minHeight: "500px",
             background: "#0d1117",
             borderRadius: "12px",
           }}
         />
       ) : (
-        <div className="flex items-center justify-center h-full p-8 text-center">
+        <div className="absolute inset-0 flex items-center justify-center p-8 text-center">
           <div className="max-w-md">
             <div className="text-6xl mb-6 opacity-20">🎬</div>
             <h3

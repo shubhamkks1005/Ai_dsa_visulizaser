@@ -684,7 +684,8 @@ export default function VisualizerPage() {
 
             {/* Preview Frame */}
             {showPreview && (
-              <div className="flex-1 relative overflow-hidden">
+              <div   className="flex-1 relative"
+                      style={{ minWidth: 0, minHeight: 0, overflow: "auto" }}>
                 {hasVisualization ? (
                   <PreviewFrame html={generatedHTML} loading={false} error="" />
                 ) : (
