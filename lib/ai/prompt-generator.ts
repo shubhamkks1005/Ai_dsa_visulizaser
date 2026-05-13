@@ -1,6 +1,6 @@
 // lib/ai/prompt-generator.ts
 
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 import Groq from "groq-sdk";
 import { AnalysisResult, CreativeScene, TechnicalSpec } from "@/types";
 import {
@@ -10,11 +10,13 @@ import {
   combineCompactPrompt,
 } from "@/lib/ai/prompts";
 import {
+  callWithGeminiRotation,
   runModelChain,
-  getOpenRouterKey,
   getGroqKey,
   MODELS,
-  OPENROUTER_HEADERS,
+  GeminiKeyRotator,
+  GEMINI_RETRY_CONFIG,
+  GROQ_RETRY_CONFIG,
   type ModelFn,
 } from "@/lib/ai/ai-utils";
 
@@ -30,7 +32,7 @@ export interface PromptGeneratorResult {
 }
 
 // ═══════════════════════════════════════════════════
-// JSON PARSER HELPER
+// JSON PARSER
 // ═══════════════════════════════════════════════════
 
 function parseJSONResponse<T>(text: string, label: string): T {
@@ -38,18 +40,13 @@ function parseJSONResponse<T>(text: string, label: string): T {
     throw new Error(`Empty response from ${label}`);
   }
 
-  // Strip thinking tags
   let clean = text.trim();
   clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-
-  // Strip markdown fences
   clean = clean.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
 
-  // Direct parse
   try {
     return JSON.parse(clean) as T;
   } catch {
-    // Extract first { to last }
     const start = clean.indexOf('{');
     const end   = clean.lastIndexOf('}');
     if (start !== -1 && end !== -1 && end > start) {
@@ -61,66 +58,53 @@ function parseJSONResponse<T>(text: string, label: string): T {
         );
       }
     }
-    throw new Error(`No valid JSON object found in ${label} response`);
+    throw new Error(`No valid JSON found in ${label} response`);
   }
 }
 
 // ═══════════════════════════════════════════════════
-// CLIENT HELPERS
+// GEMINI CALLER — Generic
 // ═══════════════════════════════════════════════════
 
-function getOpenRouterClient(): OpenAI {
-  return new OpenAI({
-    baseURL: 'https://openrouter.ai/api/v1',
-    apiKey:  getOpenRouterKey(),
-    defaultHeaders: OPENROUTER_HEADERS,
-  });
-}
-
-function getGroqClient(): Groq {
-  return new Groq({ apiKey: getGroqKey() });
-}
-
-// ═══════════════════════════════════════════════════
-// GENERIC OPENROUTER CALLER
-// ═══════════════════════════════════════════════════
-
-async function callOpenRouter<T>(
-  model:        string,
+async function callGemini<T>(
+  modelName:    string,
   systemPrompt: string,
   userPrompt:   string,
-  maxTokens:    number,
-  temperature:  number,
   label:        string
 ): Promise<T> {
-  const client = getOpenRouterClient();
+  return callWithGeminiRotation(modelName, async (apiKey) => {
+    const ai = new GoogleGenAI({ apiKey });
 
-  const completion = await client.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user',   content: userPrompt   },
-    ],
-    max_tokens:  maxTokens,
-    temperature,
-  });
+    const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
 
-  const text = completion.choices[0]?.message?.content;
-  return parseJSONResponse<T>(text || '', label);
+    const response = await ai.models.generateContent({
+      model:    modelName,
+      contents: fullPrompt,
+      config: {
+        responseMimeType: 'application/json',
+      },
+    });
+
+    const text = response.text;
+    if (!text || text.trim().length === 0) {
+      throw new Error(`Empty response from Gemini ${modelName}`);
+    }
+
+    return parseJSONResponse<T>(text, label);
+  }, GEMINI_RETRY_CONFIG);
 }
 
 // ═══════════════════════════════════════════════════
-// GENERIC GROQ CALLER
+// GROQ CALLER — Generic
 // ═══════════════════════════════════════════════════
 
 async function callGroq<T>(
   systemPrompt: string,
   userPrompt:   string,
   maxTokens:    number,
-  temperature:  number,
   label:        string
 ): Promise<T> {
-  const groq = getGroqClient();
+  const groq = new Groq({ apiKey: getGroqKey() });
 
   const completion = await groq.chat.completions.create({
     model: MODELS.groq.llama70B,
@@ -128,7 +112,7 @@ async function callGroq<T>(
       { role: 'system', content: systemPrompt },
       { role: 'user',   content: userPrompt   },
     ],
-    temperature,
+    temperature:     0.5,
     max_tokens:      maxTokens,
     response_format: { type: 'json_object' },
   });
@@ -138,14 +122,13 @@ async function callGroq<T>(
 }
 
 // ═══════════════════════════════════════════════════
-// CREATIVE SCENE VALIDATORS
+// CREATIVE SCENE VALIDATOR
 // ═══════════════════════════════════════════════════
 
 function validateCreativeScene(scene: CreativeScene): void {
   if (!scene) throw new Error('Creative scene is null/undefined');
-
-  if (!scene.metaphor)  throw new Error('Creative scene missing metaphor');
-  if (!scene.sceneName) throw new Error('Creative scene missing sceneName');
+  if (!scene.metaphor)  throw new Error('Missing metaphor');
+  if (!scene.sceneName) throw new Error('Missing sceneName');
 
   // Hero character
   if (!scene.heroCharacter) {
@@ -203,10 +186,10 @@ function validateCreativeScene(scene: CreativeScene): void {
   // Step to scene mapping
   if (!Array.isArray(scene.stepToSceneMapping)) {
     scene.stepToSceneMapping = [
-      { stepType: 'initialize', visual: 'elements appear',    animation: 'fadeInScale' },
-      { stepType: 'compare',    visual: 'elements highlight',  animation: 'glowPulse'  },
-      { stepType: 'swap',       visual: 'elements exchange',   animation: 'moveArc'    },
-      { stepType: 'complete',   visual: 'celebration',         animation: 'confettiBurst' },
+      { stepType: 'initialize', visual: 'elements appear',   animation: 'fadeInScale'    },
+      { stepType: 'compare',    visual: 'elements highlight', animation: 'glowPulse'      },
+      { stepType: 'swap',       visual: 'elements exchange',  animation: 'moveArc'        },
+      { stepType: 'complete',   visual: 'celebration',        animation: 'confettiBurst'  },
     ];
   }
 
@@ -241,14 +224,12 @@ function validateCreativeScene(scene: CreativeScene): void {
 function validateTechnicalSpec(spec: TechnicalSpec): void {
   if (!spec) throw new Error('Technical spec is null/undefined');
 
-  // Template type
   const validTemplates = ['array','graph','tree','dp','stackqueue','recursion'];
   if (!spec.templateType || !validTemplates.includes(spec.templateType)) {
     console.warn(`[PromptGen] Invalid templateType "${spec.templateType}", defaulting to array`);
     spec.templateType = 'array';
   }
 
-  // Layout rules
   if (!spec.layoutRules) {
     spec.layoutRules = {
       mainScene: 'centered elements with equal spacing',
@@ -274,7 +255,6 @@ function validateTechnicalSpec(spec: TechnicalSpec): void {
     }
   }
 
-  // Animation mapping
   if (!spec.animationMapping || typeof spec.animationMapping !== 'object') {
     spec.animationMapping = {
       initialize: 'stagger + fadeInScale',
@@ -293,11 +273,10 @@ function validateTechnicalSpec(spec: TechnicalSpec): void {
     }
   }
 
-  // Base interval
   if (
     !spec.baseInterval ||
     typeof spec.baseInterval !== 'number' ||
-    spec.baseInterval < 300 ||
+    spec.baseInterval < 300  ||
     spec.baseInterval > 5000
   ) {
     spec.baseInterval = 1200;
@@ -305,139 +284,120 @@ function validateTechnicalSpec(spec: TechnicalSpec): void {
 }
 
 // ═══════════════════════════════════════════════════
-// CREATIVE MODEL CHAIN BUILDER
+// CREATIVE CHAIN BUILDER
 // ═══════════════════════════════════════════════════
 
 function buildCreativeChain(analysis: AnalysisResult): ModelFn<CreativeScene>[] {
-  const systemPrompt = 'You are a creative visual director. Return ONLY valid JSON. No explanation, no markdown, no thinking tags.';
-  const userPrompt   = buildCreativePrompt(analysis);
+  const systemPrompt =
+    'You are a creative visual director for algorithm animations. ' +
+    'Return ONLY valid JSON. No explanation, no markdown.';
+  const userPrompt = buildCreativePrompt(analysis);
 
   return [
-    // 1. Llama 3.3 70B Instruct (best for creative)
+    // 1. Gemini Pro — best creativity
     {
-      name: 'Llama 3.3 Instruct',
-      fn: () => callOpenRouter<CreativeScene>(
-        MODELS.openrouter.llama70BInstruct,
-        systemPrompt,
-        userPrompt,
-        3000,
-        0.7,
-        'Llama creative'
-      ).then(scene => { validateCreativeScene(scene); return scene; }),
+      name: 'Gemini Pro (Creative)',
+      fn: async () => {
+        const scene = await callGemini<CreativeScene>(
+          MODELS.gemini.pro,
+          systemPrompt,
+          userPrompt,
+          'Gemini Pro creative'
+        );
+        validateCreativeScene(scene);
+        return scene;
+      },
     },
 
-    // 2. GPT-OSS 120B (strong backup)
+    // 2. Gemini Flash — fast fallback
     {
-      name: 'GPT-OSS 120B',
-      fn: () => callOpenRouter<CreativeScene>(
-        MODELS.openrouter.gptOSS120B,
-        systemPrompt,
-        userPrompt,
-        3000,
-        0.7,
-        'GPT-OSS creative'
-      ).then(scene => { validateCreativeScene(scene); return scene; }),
+      name: 'Gemini Flash (Creative)',
+      fn: async () => {
+        const scene = await callGemini<CreativeScene>(
+          MODELS.gemini.flash,
+          systemPrompt,
+          userPrompt,
+          'Gemini Flash creative'
+        );
+        validateCreativeScene(scene);
+        return scene;
+      },
     },
 
-    // 3. Gemma 31B (creative fallback)
+    // 3. Groq — last resort
     {
-      name: 'Gemma 31B',
-      fn: () => callOpenRouter<CreativeScene>(
-        MODELS.openrouter.gemma31B,
-        systemPrompt,
-        userPrompt,
-        3000,
-        0.7,
-        'Gemma creative'
-      ).then(scene => { validateCreativeScene(scene); return scene; }),
-    },
-
-    // 4. Groq Llama (final fallback)
-    {
-      name: 'Groq Llama',
-      fn: () => callGroq<CreativeScene>(
-        systemPrompt,
-        userPrompt,
-        3000,
-        0.7,
-        'Groq creative'
-      ).then(scene => { validateCreativeScene(scene); return scene; }),
+      name: 'Groq (Creative)',
+      fn: async () => {
+        const scene = await callGroq<CreativeScene>(
+          systemPrompt,
+          userPrompt,
+          3000,
+          'Groq creative'
+        );
+        validateCreativeScene(scene);
+        return scene;
+      },
     },
   ];
 }
 
 // ═══════════════════════════════════════════════════
-// TECHNICAL MODEL CHAIN BUILDER
+// TECHNICAL CHAIN BUILDER
 // ═══════════════════════════════════════════════════
 
 function buildTechnicalChain(analysis: AnalysisResult): ModelFn<TechnicalSpec>[] {
-  const systemPrompt = 'You are a technical architect for visualizations. Return ONLY valid JSON. No explanation, no markdown, no thinking tags.';
-  const userPrompt   = buildTechnicalPrompt(analysis);
+  const systemPrompt =
+    'You are a technical architect for algorithm visualizations. ' +
+    'Return ONLY valid JSON. No explanation, no markdown.';
+  const userPrompt = buildTechnicalPrompt(analysis);
 
   return [
-    // 1. Qwen Coder (best for technical/coding specs)
+    // 1. Gemini Flash — fast + accurate for technical
     {
-      name: 'Qwen Coder',
-      fn: () => callOpenRouter<TechnicalSpec>(
-        MODELS.openrouter.qwenCoder,
-        systemPrompt,
-        userPrompt,
-        2000,
-        0.2,
-        'Qwen technical'
-      ).then(spec => { validateTechnicalSpec(spec); return spec; }),
+      name: 'Gemini Flash (Technical)',
+      fn: async () => {
+        const spec = await callGemini<TechnicalSpec>(
+          MODELS.gemini.flash,
+          systemPrompt,
+          userPrompt,
+          'Gemini Flash technical'
+        );
+        validateTechnicalSpec(spec);
+        return spec;
+      },
     },
 
-    // 2. Llama 3.3 Instruct (reliable fallback)
+    // 2. Gemini Flash Lite — cheaper fallback
     {
-      name: 'Llama 3.3 Instruct',
-      fn: () => callOpenRouter<TechnicalSpec>(
-        MODELS.openrouter.llama70BInstruct,
-        systemPrompt,
-        userPrompt,
-        2000,
-        0.2,
-        'Llama technical'
-      ).then(spec => { validateTechnicalSpec(spec); return spec; }),
+      name: 'Gemini Flash Lite (Technical)',
+      fn: async () => {
+        const spec = await callGemini<TechnicalSpec>(
+          MODELS.gemini.flashLite,
+          systemPrompt,
+          userPrompt,
+          'Gemini Flash Lite technical'
+        );
+        validateTechnicalSpec(spec);
+        return spec;
+      },
     },
 
-    // 3. GPT-OSS 20B (lightweight backup)
+    // 3. Groq — last resort
     {
-      name: 'GPT-OSS 20B',
-      fn: () => callOpenRouter<TechnicalSpec>(
-        MODELS.openrouter.gptOSS20B,
-        systemPrompt,
-        userPrompt,
-        2000,
-        0.2,
-        'GPT-OSS-20B technical'
-      ).then(spec => { validateTechnicalSpec(spec); return spec; }),
-    },
-
-    // 4. Groq Llama (final fallback)
-    {
-      name: 'Groq Llama',
-      fn: () => callGroq<TechnicalSpec>(
-        systemPrompt,
-        userPrompt,
-        2000,
-        0.2,
-        'Groq technical'
-      ).then(spec => { validateTechnicalSpec(spec); return spec; }),
+      name: 'Groq (Technical)',
+      fn: async () => {
+        const spec = await callGroq<TechnicalSpec>(
+          systemPrompt,
+          userPrompt,
+          2000,
+          'Groq technical'
+        );
+        validateTechnicalSpec(spec);
+        return spec;
+      },
     },
   ];
 }
-
-// ═══════════════════════════════════════════════════
-// RETRY CONFIG FOR PROMPT GENERATION
-// ═══════════════════════════════════════════════════
-
-const PROMPT_RETRY_CONFIG = {
-  maxRetries:  2,
-  baseDelayMs: 1200,
-  maxDelayMs:  10000,
-  jitterMs:    300,
-};
 
 // ═══════════════════════════════════════════════════
 // MAIN ORCHESTRATOR
@@ -446,57 +406,46 @@ const PROMPT_RETRY_CONFIG = {
 /**
  * generatePrompt(analysis)
  *
- * Orchestrates creative + technical chunk generation.
- * Runs both chunks in PARALLEL for speed.
- * Combines using backend functions (no extra AI call).
+ * Creative chain:  Gemini Pro → Gemini Flash → Groq
+ * Technical chain: Gemini Flash → Gemini Flash Lite → Groq
  *
- * Creative chain:
- *   1. OpenRouter Llama 3.3 70B Instruct
- *   2. OpenRouter GPT-OSS 120B
- *   3. OpenRouter Gemma 31B
- *   4. Groq Llama 3.3 70B
- *
- * Technical chain:
- *   1. OpenRouter Qwen Coder
- *   2. OpenRouter Llama 3.3 70B Instruct
- *   3. OpenRouter GPT-OSS 20B
- *   4. Groq Llama 3.3 70B
- *
- * @param analysis  Validated AnalysisResult from analyzer
- * @returns         PromptGeneratorResult with all prompt artifacts
+ * NOTE: Sequential (not parallel) to avoid rate limit spikes.
  */
 export async function generatePrompt(
   analysis: AnalysisResult
 ): Promise<PromptGeneratorResult> {
-  console.log('[PromptGen] Starting prompt generation for:', analysis.algorithmName);
+  console.log('[PromptGen] Starting for:', analysis.algorithmName);
 
-  // Build model chains
-  const creativeChain  = buildCreativeChain(analysis);
-  const technicalChain = buildTechnicalChain(analysis);
-
-  // ── Run creative + technical in PARALLEL ──────────
-  const [creativeResult, technicalResult] = await Promise.all([
-    runModelChain(creativeChain,  PROMPT_RETRY_CONFIG, 'Creative'),
-    runModelChain(technicalChain, PROMPT_RETRY_CONFIG, 'Technical'),
-  ]);
-
+  // ── Creative first ────────────────────────────────
+  const creativeChain = buildCreativeChain(analysis);
+  const creativeResult = await runModelChain(
+    creativeChain,
+    GEMINI_RETRY_CONFIG,
+    'Creative'
+  );
   const creativeScene = creativeResult.result;
+
+  // ── Technical second (sequential to avoid rate spike) ──
+  const technicalChain = buildTechnicalChain(analysis);
+  const technicalResult = await runModelChain(
+    technicalChain,
+    GEMINI_RETRY_CONFIG,
+    'Technical'
+  );
   const technicalSpec = technicalResult.result;
 
-  // ── Combine using backend functions (no AI) ───────
+  // ── Combine ───────────────────────────────────────
   console.log('[PromptGen] Combining chunks...');
 
   const fullPrompt    = combineFullPrompt(analysis, creativeScene, technicalSpec);
   const compactPrompt = combineCompactPrompt(analysis, creativeScene, technicalSpec);
 
-  console.log('[PromptGen] ✅ Prompt generation complete');
-  console.log(`[PromptGen] Creative via: ${creativeResult.model}`);
+  console.log('[PromptGen] ✅ Complete');
+  console.log(`[PromptGen] Creative via:  ${creativeResult.model}`);
   console.log(`[PromptGen] Technical via: ${technicalResult.model}`);
-  console.log(`[PromptGen] Template type: ${technicalSpec.templateType}`);
-  console.log(`[PromptGen] Metaphor: ${creativeScene.metaphor}`);
-  console.log(`[PromptGen] Scene: ${creativeScene.sceneName}`);
-  console.log(`[PromptGen] Full prompt length: ${fullPrompt.length}`);
-  console.log(`[PromptGen] Compact prompt length: ${compactPrompt.length}`);
+  console.log(`[PromptGen] Template:      ${technicalSpec.templateType}`);
+  console.log(`[PromptGen] Metaphor:      ${creativeScene.metaphor}`);
+  console.log(`[PromptGen] Scene:         ${creativeScene.sceneName}`);
 
   return {
     creativeScene,

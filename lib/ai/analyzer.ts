@@ -2,16 +2,14 @@
 
 import { GoogleGenAI } from "@google/genai";
 import Groq from "groq-sdk";
-import OpenAI from "openai";
 import { AnalysisResult } from "@/types";
 import {
   callWithGeminiRotation,
   runModelChain,
   getGroqKey,
-  getOpenRouterKey,
   MODELS,
-  OPENROUTER_HEADERS,
   GeminiKeyRotator,
+  GEMINI_RETRY_CONFIG,
   type ModelFn,
 } from "@/lib/ai/ai-utils";
 
@@ -79,18 +77,14 @@ CRITICAL RULES:
 // ═══════════════════════════════════════════════════
 
 function parseAnalysisJSON(text: string): AnalysisResult {
-  // Strip thinking tags
   let clean = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
-  // Strip markdown fences
   const fenceMatch = clean.match(/```(?:json)?\s*([\s\S]*?)```/);
   const jsonString = fenceMatch ? fenceMatch[1].trim() : clean;
 
-  // Direct parse
   try {
     return JSON.parse(jsonString);
   } catch {
-    // Extract first { to last }
     const start = jsonString.indexOf('{');
     const end   = jsonString.lastIndexOf('}');
     if (start !== -1 && end !== -1 && end > start) {
@@ -110,7 +104,6 @@ function parseAnalysisJSON(text: string): AnalysisResult {
 
 function validateAnalysis(analysis: AnalysisResult): void {
 
-  // Required fields
   if (!analysis.algorithmName || typeof analysis.algorithmName !== 'string') {
     throw new Error('Invalid analysis: missing algorithmName');
   }
@@ -136,7 +129,7 @@ function validateAnalysis(analysis: AnalysisResult): void {
     timingMult:  step.timingMult  ?? 1.0,
   }));
 
-  // Normalize variables: string[] → {name, meaning}[]
+  // Normalize variables
   if (Array.isArray(analysis.variables)) {
     analysis.variables = (analysis.variables as any[]).map(v => {
       if (typeof v === 'string') {
@@ -173,10 +166,9 @@ function validateAnalysis(analysis: AnalysisResult): void {
   // Normalize physicalInterpretation
   if (!analysis.physicalInterpretation ||
       analysis.physicalInterpretation.trim().length < 10) {
-    analysis.physicalInterpretation =
-      analysis.description
-        ? analysis.description
-        : `A step-by-step process that solves the ${analysis.algorithmName} problem.`;
+    analysis.physicalInterpretation = analysis.description
+      ? analysis.description
+      : `A step-by-step process that solves the ${analysis.algorithmName} problem.`;
   }
 
   // Normalize edgeCases
@@ -188,7 +180,6 @@ function validateAnalysis(analysis: AnalysisResult): void {
     ];
   }
 
-  // Normalize optional string fields
   if (!analysis.description) {
     analysis.description = `${analysis.algorithmName} algorithm implementation.`;
   }
@@ -197,34 +188,17 @@ function validateAnalysis(analysis: AnalysisResult): void {
     analysis.keyInsight = `${analysis.algorithmName} achieves its goal by processing elements systematically.`;
   }
 
-  if (!analysis.timeComplexity) {
-    analysis.timeComplexity = 'O(n) — depends on input size';
-  }
-
-  if (!analysis.spaceComplexity) {
-    analysis.spaceComplexity = 'O(1) — constant extra space';
-  }
-
-  if (!analysis.inputExample) {
-    analysis.inputExample = 'See code for example input';
-  }
-
-  if (!analysis.expectedOutput) {
-    analysis.expectedOutput = 'See code for expected output';
-  }
-
-  if (!analysis.language) {
-    analysis.language = 'javascript';
-  }
+  if (!analysis.timeComplexity)  analysis.timeComplexity  = 'O(n) — depends on input size';
+  if (!analysis.spaceComplexity) analysis.spaceComplexity = 'O(1) — constant extra space';
+  if (!analysis.inputExample)    analysis.inputExample    = 'See code for example input';
+  if (!analysis.expectedOutput)  analysis.expectedOutput  = 'See code for expected output';
+  if (!analysis.language)        analysis.language        = 'javascript';
 }
 
 // ═══════════════════════════════════════════════════
-// MODEL CALLERS
+// GEMINI CALLER
 // ═══════════════════════════════════════════════════
 
-/**
- * Gemini caller — uses key rotation
- */
 async function callGemini(
   code:      string,
   language:  string,
@@ -249,12 +223,13 @@ async function callGemini(
     validateAnalysis(analysis);
 
     return analysis;
-  });
+  }, GEMINI_RETRY_CONFIG);
 }
 
-/**
- * Groq Llama caller
- */
+// ═══════════════════════════════════════════════════
+// GROQ CALLER
+// ═══════════════════════════════════════════════════
+
 async function callGroqAnalyzer(
   code:     string,
   language: string
@@ -290,117 +265,46 @@ async function callGroqAnalyzer(
   return analysis;
 }
 
-/**
- * OpenRouter GPT-OSS 120B caller
- */
-async function callOpenRouterAnalyzer(
-  code:     string,
-  language: string
-): Promise<AnalysisResult> {
-  const client = new OpenAI({
-    baseURL: 'https://openrouter.ai/api/v1',
-    apiKey:  getOpenRouterKey(),
-    defaultHeaders: OPENROUTER_HEADERS,
-  });
-
-  const prompt = buildAnalyzerPrompt(code, language);
-
-  const completion = await client.chat.completions.create({
-    model: MODELS.openrouter.gptOSS120B,
-    messages: [
-      {
-        role:    'system',
-        content: 'You are an expert algorithm analyzer. Always respond with valid JSON only. No markdown, no explanation, no extra text.',
-      },
-      {
-        role:    'user',
-        content: prompt,
-      },
-    ],
-    max_tokens:  4096,
-    temperature: 0.2,
-  });
-
-  const text = completion.choices[0]?.message?.content;
-  if (!text || text.trim().length === 0) {
-    throw new Error('Empty response from OpenRouter GPT-OSS');
-  }
-
-  const analysis = parseAnalysisJSON(text);
-  validateAnalysis(analysis);
-
-  return analysis;
-}
-
 // ═══════════════════════════════════════════════════
 // MAIN EXPORT
 // ═══════════════════════════════════════════════════
 
-/**
- * analyzeCode(code, language)
- *
- * Analyzes algorithm code and returns structured AnalysisResult.
- *
- * Model chain:
- *   1. Gemini 2.5 Flash     (with key rotation + backoff)
- *   2. Gemini 2.5 Flash Lite (with key rotation + backoff)
- *   3. Groq Llama 3.3 70B   (with backoff)
- *   4. OpenRouter GPT-OSS 120B (with backoff)
- *
- * @param code     Raw algorithm code string
- * @param language Programming language
- * @returns        Validated AnalysisResult
- */
 export async function analyzeCode(
   code:     string,
   language: string
 ): Promise<AnalysisResult> {
   console.log('[Analyzer] Starting analysis...');
 
-  // Build model chain
   const models: ModelFn<AnalysisResult>[] = [];
 
-  // ── Gemini models (only if keys available) ────────
+  // Gemini models
   if (GeminiKeyRotator.hasAnyKey()) {
     models.push({
       name: `Gemini ${MODELS.gemini.flash}`,
       fn:   () => callGemini(code, language, MODELS.gemini.flash),
     });
-
     models.push({
       name: `Gemini ${MODELS.gemini.flashLite}`,
       fn:   () => callGemini(code, language, MODELS.gemini.flashLite),
     });
   } else {
-    console.warn('[Analyzer] No Gemini keys found, skipping Gemini models');
+    console.warn('[Analyzer] No Gemini keys — skipping Gemini');
   }
 
-  // ── Groq ──────────────────────────────────────────
+  // Groq fallback
   models.push({
     name: 'Groq Llama 3.3 70B',
     fn:   () => callGroqAnalyzer(code, language),
   });
 
-  // ── OpenRouter GPT-OSS 120B ───────────────────────
-  models.push({
-    name: 'OpenRouter GPT-OSS 120B',
-    fn:   () => callOpenRouterAnalyzer(code, language),
-  });
-
-  // Run model chain
   const { result, model, attempt } = await runModelChain(
     models,
-    {
-      maxRetries:  2,
-      baseDelayMs: 1500,
-      maxDelayMs:  12000,
-      jitterMs:    400,
-    },
+    GEMINI_RETRY_CONFIG,
     'Analysis'
   );
 
   console.log(
-    `[Analyzer] ✅ Analysis complete via ${model} (attempt ${attempt})` +
+    `[Analyzer] ✅ Complete via ${model} (attempt ${attempt})` +
     ` — ${result.steps.length} steps, algo: ${result.algorithmName}`
   );
 

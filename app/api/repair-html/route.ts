@@ -2,14 +2,14 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
-import OpenAI from "openai";
+import { GoogleGenAI } from "@google/genai";
 import Groq from "groq-sdk";
 import {
+  callWithGeminiRotation,
   runModelChain,
-  getOpenRouterKey,
   getGroqKey,
   MODELS,
-  OPENROUTER_HEADERS,
+  GEMINI_RETRY_CONFIG,
   type ModelFn,
 } from "@/lib/ai/ai-utils";
 
@@ -18,20 +18,17 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 55;
 
 // ═══════════════════════════════════════════════════
-// HTML EXTRACTION
+// HTML HELPERS
 // ═══════════════════════════════════════════════════
 
 function extractHTML(text: string): string {
   if (!text) return '';
 
-  // Strip think tags
   text = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
-  // Strip markdown fences
   const fenceMatch = text.match(/```(?:html)?\s*([\s\S]*?)```/i);
   if (fenceMatch) return fenceMatch[1].trim();
 
-  // If starts with DOCTYPE or html tag
   const trimmed = text.trim();
   if (
     trimmed.startsWith('<!DOCTYPE') ||
@@ -41,7 +38,6 @@ function extractHTML(text: string): string {
     return trimmed;
   }
 
-  // Try to extract DOCTYPE...html block
   const docMatch = trimmed.match(/(<!DOCTYPE[\s\S]*<\/html>)/i);
   if (docMatch) return docMatch[1].trim();
 
@@ -60,66 +56,58 @@ function validateRepairedHTML(html: string): boolean {
 }
 
 // ═══════════════════════════════════════════════════
-// REPAIR PROMPT BUILDERS
+// REPAIR PROMPTS
 // ═══════════════════════════════════════════════════
 
 function buildRepairSystemPrompt(): string {
-  return `You are an expert HTML/CSS/JS debugger specializing in algorithm visualizations.
+  return `You are an expert HTML/CSS/JS debugger for algorithm visualizations.
 
-Your task: Fix issues in a visualization HTML file without changing its creative content.
+Fix issues in the visualization HTML without changing creative content.
 
 WHAT TO FIX:
 1. Unclosed or malformed HTML tags
-2. Z-index conflicts (controls/caption hidden behind scene elements)
+2. Z-index conflicts (controls/caption hidden behind scene)
 3. Overflow issues (content clipping outside bounds)
-4. Controls bar not visible (ensure #controls-bar is always visible)
-5. Caption text clipping (ensure #caption-bar has enough height)
-6. Sidebar not scrollable (ensure overflow-y: auto on #sidebar-content)
-7. Scene elements overflowing outside #scene-area
-8. Missing </script> or </style> closing tags
-9. JavaScript syntax errors (unclosed brackets, missing semicolons)
-10. initVisualization() not called or called multiple times
-11. window.STEPS empty or undefined at runtime
-12. renderScene() missing required action handlers
+4. Controls bar not visible (#controls-bar z-index >= 25)
+5. Caption not visible (#caption-bar z-index >= 25)
+6. Sidebar not scrollable (overflow-y: auto)
+7. Missing </script> or </style> tags
+8. JavaScript syntax errors
+9. initVisualization() not called or called multiple times
+10. window.STEPS empty or undefined
 
 WHAT NOT TO CHANGE:
-- The creative theme, colors, metaphor
-- The hero character design
-- The environment/background
-- The step data and captions
-- The algorithm logic
-- Any working animations
+- Creative theme, colors, metaphor
+- Hero character design
+- Environment and background
+- Step data and captions
+- Algorithm logic
+- Working animations
 
-Z-INDEX RULES (enforce these):
-  background elements: z-index 1-4
-  scene elements:      z-index 5-14
-  pointers/chars:      z-index 15-24
-  panels/UI:           z-index 25-29
-  overlays:            z-index 30+
+Z-INDEX RULES:
+  background:  1-4
+  elements:    5-14
+  pointers:    15-24
+  panels/UI:   25-29
+  overlays:    30+
 
 OUTPUT RULES:
 - Return ONLY the complete fixed HTML
 - Start with <!DOCTYPE html>
 - End with </html>
-- No explanation before or after
-- No markdown fences`;
+- No explanation, no markdown`;
 }
 
 function buildRepairUserPrompt(
-  html:           string,
-  algorithmName:  string,
-  compactPrompt?: string,
-  maxChars?:      number
+  html:          string,
+  algorithmName: string,
+  maxChars:      number = 12000
 ): string {
-  const limit       = maxChars || 12000;
-  const htmlPreview  = html.length > limit
-    ? html.slice(0, limit) + '\n\n... [truncated for repair] ...\n</body>\n</html>'
+  const htmlPreview = html.length > maxChars
+    ? html.slice(0, maxChars) + '\n\n... [truncated] ...\n</body>\n</html>'
     : html;
 
   return `Fix this ${algorithmName} visualization HTML.
-
-Algorithm: ${algorithmName}
-${compactPrompt ? `Context: ${compactPrompt.slice(0, 300)}` : ''}
 
 HTML TO REPAIR:
 ${htmlPreview}
@@ -128,68 +116,155 @@ Return the complete fixed HTML starting with <!DOCTYPE html>.`;
 }
 
 // ═══════════════════════════════════════════════════
-// CLIENT HELPERS
+// QUICK LOCAL FIXER
 // ═══════════════════════════════════════════════════
 
-function getOpenRouterClient(): OpenAI {
-  return new OpenAI({
-    baseURL: 'https://openrouter.ai/api/v1',
-    apiKey:  getOpenRouterKey(),
-    defaultHeaders: OPENROUTER_HEADERS,
-  });
-}
+function quickLocalFix(html: string): {
+  fixed:         string;
+  changesApplied: string[];
+} {
+  if (!html) return { fixed: html, changesApplied: [] };
 
-function getGroqClient(): Groq {
-  return new Groq({ apiKey: getGroqKey() });
-}
+  let fixed           = html;
+  const changes: string[] = [];
 
-// ═══════════════════════════════════════════════════
-// GENERIC REPAIR CALLERS
-// ═══════════════════════════════════════════════════
-
-async function callOpenRouterRepair(
-  model:         string,
-  html:          string,
-  algorithmName: string,
-  compactPrompt: string | undefined,
-  modelName:     string,
-  maxChars?:     number
-): Promise<string> {
-  const client = getOpenRouterClient();
-
-  const completion = await client.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: buildRepairSystemPrompt() },
-      { role: 'user',   content: buildRepairUserPrompt(html, algorithmName, compactPrompt, maxChars) },
-    ],
-    max_tokens:  7500,
-    temperature: 0.1,
-  });
-
-  const text     = completion.choices[0]?.message?.content;
-  const repaired = extractHTML(text || '');
-
-  if (!validateRepairedHTML(repaired)) {
-    throw new Error(`${modelName} repair produced invalid HTML`);
+  // Fix 1: controls-bar z-index
+  const ctrlMatch = fixed.match(/(#controls-bar\s*\{[^}]*?)z-index\s*:\s*(\d+)/);
+  if (ctrlMatch && parseInt(ctrlMatch[2]) < 25) {
+    fixed = fixed.replace(
+      /(#controls-bar\s*\{[^}]*?)z-index\s*:\s*\d+/,
+      '$1z-index: 25'
+    );
+    changes.push('controls-bar z-index → 25');
   }
 
-  return repaired;
+  // Fix 2: caption-bar z-index
+  const capMatch = fixed.match(/(#caption-bar\s*\{[^}]*?)z-index\s*:\s*(\d+)/);
+  if (capMatch && parseInt(capMatch[2]) < 25) {
+    fixed = fixed.replace(
+      /(#caption-bar\s*\{[^}]*?)z-index\s*:\s*\d+/,
+      '$1z-index: 25'
+    );
+    changes.push('caption-bar z-index → 25');
+  }
+
+  // Fix 3: stats-bar z-index
+  const statsMatch = fixed.match(/(#stats-bar\s*\{[^}]*?)z-index\s*:\s*(\d+)/);
+  if (statsMatch && parseInt(statsMatch[2]) < 25) {
+    fixed = fixed.replace(
+      /(#stats-bar\s*\{[^}]*?)z-index\s*:\s*\d+/,
+      '$1z-index: 25'
+    );
+    changes.push('stats-bar z-index → 25');
+  }
+
+  // Fix 4: scene-element position fixed → absolute
+  if (fixed.includes('.scene-element') && fixed.includes('position: fixed')) {
+    fixed = fixed.replace(
+      /(\.scene-element\s*\{[^}]*?)position\s*:\s*fixed/g,
+      '$1position: absolute'
+    );
+    changes.push('scene-element position fixed → absolute');
+  }
+
+  // Fix 5: sidebar overflow
+  if (fixed.includes('#sidebar-content')) {
+    const sidebarMatch = fixed.match(/#sidebar-content\s*\{([^}]*)\}/);
+    if (sidebarMatch && !sidebarMatch[1].includes('overflow')) {
+      fixed = fixed.replace(
+        /(#sidebar-content\s*\{)([^}]*?)(\})/,
+        '$1$2overflow-y: auto;\n$3'
+      );
+      changes.push('sidebar-content overflow-y: auto');
+    }
+  }
+
+  // Fix 6: duplicate </html>
+  const htmlCloseCount = (fixed.match(/<\/html>/gi) || []).length;
+  if (htmlCloseCount > 1) {
+    const lastIdx = fixed.lastIndexOf('</html>');
+    fixed = fixed.slice(0, lastIdx).replace(/<\/html>/gi, '') + '</html>';
+    changes.push(`removed ${htmlCloseCount - 1} duplicate </html>`);
+  }
+
+  // Fix 7: unclosed <script>
+  const openScripts  = (fixed.match(/<script/gi)   || []).length;
+  const closeScripts = (fixed.match(/<\/script>/gi) || []).length;
+  if (openScripts > closeScripts) {
+    const diff = openScripts - closeScripts;
+    fixed = fixed.replace('</html>', '\n</script>'.repeat(diff) + '\n</html>');
+    changes.push(`added ${diff} missing </script>`);
+  }
+
+  // Fix 8: unclosed <style>
+  const openStyles  = (fixed.match(/<style/gi)   || []).length;
+  const closeStyles = (fixed.match(/<\/style>/gi) || []).length;
+  if (openStyles > closeStyles) {
+    const diff = openStyles - closeStyles;
+    fixed = fixed.replace('</head>', '\n</style>'.repeat(diff) + '\n</head>');
+    changes.push(`added ${diff} missing </style>`);
+  }
+
+  // Fix 9: scene-area overflow
+  if (fixed.includes('#scene-area')) {
+    const sceneAreaMatch = fixed.match(/#scene-area\s*\{([^}]*)\}/);
+    if (sceneAreaMatch && !sceneAreaMatch[1].includes('overflow')) {
+      fixed = fixed.replace(
+        /(#scene-area\s*\{)([^}]*?)(\})/,
+        '$1$2overflow: hidden;\n$3'
+      );
+      changes.push('scene-area overflow: hidden');
+    }
+  }
+
+  return { fixed, changesApplied: changes };
 }
+
+// ═══════════════════════════════════════════════════
+// GEMINI REPAIR CALLER
+// ═══════════════════════════════════════════════════
+
+async function callGeminiRepair(
+  modelName:     string,
+  html:          string,
+  algorithmName: string,
+  label:         string
+): Promise<string> {
+  return callWithGeminiRotation(modelName, async (apiKey) => {
+    const ai = new GoogleGenAI({ apiKey });
+
+    const response = await ai.models.generateContent({
+      model:    modelName,
+      contents: buildRepairSystemPrompt() + '\n\n' +
+                buildRepairUserPrompt(html, algorithmName, 12000),
+    });
+
+    const text     = response.text;
+    const repaired = extractHTML(text || '');
+
+    if (!validateRepairedHTML(repaired)) {
+      throw new Error(`${label} repair produced invalid HTML`);
+    }
+
+    return repaired;
+  }, GEMINI_RETRY_CONFIG);
+}
+
+// ═══════════════════════════════════════════════════
+// GROQ REPAIR CALLER
+// ═══════════════════════════════════════════════════
 
 async function callGroqRepair(
   html:          string,
-  algorithmName: string,
-  compactPrompt: string | undefined
+  algorithmName: string
 ): Promise<string> {
-  const groq = getGroqClient();
+  const groq = new Groq({ apiKey: getGroqKey() });
 
-  // Groq has stricter limits — send less HTML
   const completion = await groq.chat.completions.create({
     model: MODELS.groq.llama70B,
     messages: [
       { role: 'system', content: buildRepairSystemPrompt() },
-      { role: 'user',   content: buildRepairUserPrompt(html, algorithmName, compactPrompt, 8000) },
+      { role: 'user',   content: buildRepairUserPrompt(html, algorithmName, 8000) },
     ],
     temperature: 0.1,
     max_tokens:  7500,
@@ -206,39 +281,29 @@ async function callGroqRepair(
 }
 
 // ═══════════════════════════════════════════════════
-// REPAIR MODEL CHAIN BUILDER
+// REPAIR CHAIN BUILDER
 // ═══════════════════════════════════════════════════
 
 function buildRepairChain(
   html:          string,
-  algorithmName: string,
-  compactPrompt: string | undefined
+  algorithmName: string
 ): ModelFn<string>[] {
   return [
-    // 1. Qwen Coder (best for code fixes)
+    // 1. Gemini Flash Lite — cheap + fast for repair
     {
-      name: 'Qwen Coder',
-      fn: () => callOpenRouterRepair(
-        MODELS.openrouter.qwenCoder,
-        html, algorithmName, compactPrompt,
-        'Qwen Coder'
+      name: 'Gemini Flash Lite (Repair)',
+      fn:   () => callGeminiRepair(
+        MODELS.gemini.flashLite,
+        html,
+        algorithmName,
+        'Gemini Flash Lite'
       ),
     },
 
-    // 2. Llama 3.3 Instruct (reliable fallback)
+    // 2. Groq — last resort
     {
-      name: 'Llama 3.3 Instruct',
-      fn: () => callOpenRouterRepair(
-        MODELS.openrouter.llama70BInstruct,
-        html, algorithmName, compactPrompt,
-        'Llama 3.3 Instruct'
-      ),
-    },
-
-    // 3. Groq Llama (last resort — shorter context)
-    {
-      name: 'Groq Llama',
-      fn: () => callGroqRepair(html, algorithmName, compactPrompt),
+      name: 'Groq (Repair)',
+      fn:   () => callGroqRepair(html, algorithmName),
     },
   ];
 }
@@ -248,110 +313,11 @@ function buildRepairChain(
 // ═══════════════════════════════════════════════════
 
 const REPAIR_RETRY_CONFIG = {
-  maxRetries:  1,     // repair is optional — fewer retries
+  maxRetries:  1,
   baseDelayMs: 1000,
-  maxDelayMs:  8000,
-  jitterMs:    300,
+  maxDelayMs:  6000,
+  jitterMs:    200,
 };
-
-// ═══════════════════════════════════════════════════
-// QUICK LOCAL FIXER
-// Fast regex-based fixes before AI repair
-// ═══════════════════════════════════════════════════
-
-function quickLocalFix(html: string): { fixed: string; changesApplied: string[] } {
-  if (!html) return { fixed: html, changesApplied: [] };
-
-  let fixed   = html;
-  const changes: string[] = [];
-
-  // Fix 1: controls-bar z-index < 25
-  const controlsMatch = fixed.match(/(#controls-bar\s*\{[^}]*?)z-index\s*:\s*(\d+)/);
-  if (controlsMatch && parseInt(controlsMatch[2]) < 25) {
-    fixed = fixed.replace(
-      /(#controls-bar\s*\{[^}]*?)z-index\s*:\s*\d+/,
-      '$1z-index: 25'
-    );
-    changes.push('controls-bar z-index → 25');
-  }
-
-  // Fix 2: caption-bar z-index < 25
-  const captionMatch = fixed.match(/(#caption-bar\s*\{[^}]*?)z-index\s*:\s*(\d+)/);
-  if (captionMatch && parseInt(captionMatch[2]) < 25) {
-    fixed = fixed.replace(
-      /(#caption-bar\s*\{[^}]*?)z-index\s*:\s*\d+/,
-      '$1z-index: 25'
-    );
-    changes.push('caption-bar z-index → 25');
-  }
-
-  // Fix 3: stats-bar z-index < 25
-  const statsMatch = fixed.match(/(#stats-bar\s*\{[^}]*?)z-index\s*:\s*(\d+)/);
-  if (statsMatch && parseInt(statsMatch[2]) < 25) {
-    fixed = fixed.replace(
-      /(#stats-bar\s*\{[^}]*?)z-index\s*:\s*\d+/,
-      '$1z-index: 25'
-    );
-    changes.push('stats-bar z-index → 25');
-  }
-
-  // Fix 4: scene-element position:fixed → absolute
-  if (fixed.includes('.scene-element') && fixed.includes('position: fixed')) {
-    fixed = fixed.replace(
-      /(\.scene-element\s*\{[^}]*?)position\s*:\s*fixed/g,
-      '$1position: absolute'
-    );
-    changes.push('scene-element position fixed → absolute');
-  }
-
-  // Fix 5: sidebar overflow
-  const sidebarMatch = fixed.match(/#sidebar-content\s*\{([^}]*)\}/);
-  if (sidebarMatch && !sidebarMatch[1].includes('overflow')) {
-    fixed = fixed.replace(
-      /(#sidebar-content\s*\{)([^}]*?)(\})/,
-      '$1$2overflow-y: auto;\n$3'
-    );
-    changes.push('sidebar overflow-y: auto added');
-  }
-
-  // Fix 6: duplicate </html>
-  const htmlCloseCount = (fixed.match(/<\/html>/gi) || []).length;
-  if (htmlCloseCount > 1) {
-    const lastIdx = fixed.lastIndexOf('</html>');
-    fixed = fixed.slice(0, lastIdx).replace(/<\/html>/gi, '') + '</html>';
-    changes.push(`removed ${htmlCloseCount - 1} duplicate </html>`);
-  }
-
-  // Fix 7: unclosed <script> tags
-  const openScripts  = (fixed.match(/<script/gi)    || []).length;
-  const closeScripts = (fixed.match(/<\/script>/gi)  || []).length;
-  if (openScripts > closeScripts) {
-    const diff = openScripts - closeScripts;
-    fixed = fixed.replace('</html>', '\n</script>'.repeat(diff) + '\n</html>');
-    changes.push(`added ${diff} missing </script> tag(s)`);
-  }
-
-  // Fix 8: unclosed <style> tags
-  const openStyles  = (fixed.match(/<style/gi)    || []).length;
-  const closeStyles = (fixed.match(/<\/style>/gi) || []).length;
-  if (openStyles > closeStyles) {
-    const diff = openStyles - closeStyles;
-    fixed = fixed.replace('</head>', '\n</style>'.repeat(diff) + '\n</head>');
-    changes.push(`added ${diff} missing </style> tag(s)`);
-  }
-
-  // Fix 9: scene-area overflow hidden
-  const sceneAreaMatch = fixed.match(/#scene-area\s*\{([^}]*)\}/);
-  if (sceneAreaMatch && !sceneAreaMatch[1].includes('overflow')) {
-    fixed = fixed.replace(
-      /(#scene-area\s*\{)([^}]*?)(\})/,
-      '$1$2overflow: hidden;\n$3'
-    );
-    changes.push('scene-area overflow: hidden added');
-  }
-
-  return { fixed, changesApplied: changes };
-}
 
 // ═══════════════════════════════════════════════════
 // POST HANDLER
@@ -360,7 +326,7 @@ function quickLocalFix(html: string): { fixed: string; changesApplied: string[] 
 export async function POST(request: NextRequest) {
   try {
 
-    // ── Auth check ──────────────────────────────────
+    // ── Auth ────────────────────────────────────────
     const session = await auth();
     if (!session?.user?.id) {
       return NextResponse.json(
@@ -380,10 +346,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Extract inputs ──────────────────────────────
     const html          = typeof body.html          === 'string' ? body.html          : '';
     const algorithmName = typeof body.algorithmName === 'string' ? body.algorithmName : 'Algorithm';
-    const compactPrompt = typeof body.compactPrompt === 'string' ? body.compactPrompt : undefined;
 
     if (!html || html.trim().length < 200) {
       return NextResponse.json(
@@ -392,37 +356,31 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log(
-      '[Repair] Starting repair for:', algorithmName,
-      '| HTML length:', html.length
-    );
+    console.log('[Repair] Starting for:', algorithmName, '| Length:', html.length);
 
-    // ── Step 1: Quick local fixes ───────────────────
+    // ── Step 1: Local fixes ─────────────────────────
     const { fixed: locallyFixed, changesApplied } = quickLocalFix(html);
 
     if (changesApplied.length > 0) {
-      console.log('[Repair] Local fixes applied:', changesApplied);
-    } else {
-      console.log('[Repair] No local fixes needed');
+      console.log('[Repair] Local fixes:', changesApplied);
     }
 
-    // ── Step 2: Check if local fix is enough ────────
+    // ── Step 2: If no changes + already valid → return
     if (validateRepairedHTML(locallyFixed) && changesApplied.length === 0) {
-      console.log('[Repair] HTML already valid — skipping AI repair');
+      console.log('[Repair] Already valid — no repair needed');
       return NextResponse.json(
         {
           success:     true,
           html:        locallyFixed,
           repairModel: 'none',
-          warning:     'No issues found — returned original HTML.',
         },
         { status: 200 }
       );
     }
 
-    // If local fixes were enough and HTML is valid, return without AI
-    if (validateRepairedHTML(locallyFixed) && changesApplied.length > 0) {
-      console.log('[Repair] Local fixes sufficient — skipping AI repair');
+    // ── Step 3: If local fixes sufficient → return
+    if (validateRepairedHTML(locallyFixed)) {
+      console.log('[Repair] Local fixes sufficient');
       return NextResponse.json(
         {
           success:     true,
@@ -434,10 +392,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // ── Step 3: AI repair needed ────────────────────
-    console.log('[Repair] Local fixes insufficient — trying AI repair...');
+    // ── Step 4: AI repair needed ────────────────────
+    console.log('[Repair] AI repair needed...');
 
-    const chain = buildRepairChain(locallyFixed, algorithmName, compactPrompt);
+    const chain = buildRepairChain(locallyFixed, algorithmName);
 
     try {
       const { result: repairedHTML, model: repairModel } = await runModelChain(
@@ -446,8 +404,7 @@ export async function POST(request: NextRequest) {
         'Repair'
       );
 
-      console.log(`[Repair] ✅ AI repair complete via ${repairModel}`);
-      console.log('[Repair] Repaired HTML length:', repairedHTML.length);
+      console.log(`[Repair] ✅ Complete via ${repairModel}`);
 
       return NextResponse.json(
         {
@@ -460,9 +417,8 @@ export async function POST(request: NextRequest) {
       );
 
     } catch (aiError) {
-      // All AI repairs failed — return locally fixed version
-      console.warn('[Repair] ❌ All AI repairs failed:', aiError);
-      console.log('[Repair] Returning locally fixed HTML as fallback');
+      // AI repair failed — return locally fixed as best effort
+      console.warn('[Repair] AI repair failed — using local fixes:', aiError);
 
       return NextResponse.json(
         {
@@ -479,17 +435,11 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('[Repair] Unexpected error:', error);
 
-    const message = error instanceof Error ? error.message : 'Unknown error';
-
-    if (message.includes('API_KEY') || message.includes('not set')) {
-      return NextResponse.json(
-        { success: false, error: 'Repair service not configured.' },
-        { status: 500 }
-      );
-    }
-
     return NextResponse.json(
-      { success: false, error: 'Repair failed — the original visualization will be used.' },
+      {
+        success: false,
+        error:   'Repair failed — original visualization will be used.',
+      },
       { status: 500 }
     );
   }
