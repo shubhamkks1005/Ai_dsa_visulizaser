@@ -95,7 +95,7 @@ export default function HistoryCard({
               className="text-xs"
               style={{ color: "var(--text-muted)" }}
             >
-              {formatDate(item.createdAt)}
+              {formatDate(item.createdAt ? String(item.createdAt) : "")}
             </span>
           </div>
         </div>
