@@ -358,14 +358,17 @@ async function callGeminiGenerator(
 ): Promise<string> {
   const client = new GoogleGenAI({ apiKey });
 
-  const response = await client.models.generateContent({
-    model,
-    contents: String(prompt),
-    config: {
-      temperature: 0.3,
-      maxOutputTokens: MAX_OUTPUT_TOKENS,
+ const response = await client.models.generateContent({
+  model,
+  contents: String(prompt),
+  config: {
+    temperature: 0.3,
+    maxOutputTokens: MAX_OUTPUT_TOKENS,
+    thinkingConfig: {
+      thinkingBudget: 0,
     },
-  });
+  },
+});
 
   const text = response.text;
 
