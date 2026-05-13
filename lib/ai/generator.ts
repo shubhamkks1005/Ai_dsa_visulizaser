@@ -1,910 +1,795 @@
 // lib/ai/generator.ts
 
 import { GoogleGenAI } from "@google/genai";
-import Groq from "groq-sdk";
-import { AnalysisResult, CreativeScene, TechnicalSpec } from "@/types";
-import { AIVisualizationOutput, TemplateType } from "@/lib/visualizer/assembler";
-import {
-  callWithGeminiRotation,
-  runModelChain,
-  getGroqKey,
-  MODELS,
-  GEMINI_RETRY_CONFIG,
-  type ModelFn,
-} from "@/lib/ai/ai-utils";
+import type { AnalysisResult } from "@/types";
+import type { CreativeDirection } from "@/lib/ai/analyzer";
+import type { PromptArtifacts } from "@/lib/ai/prompts";
 
-export type { CreativeScene, TechnicalSpec };
+// ═══════════════════════════════════════════════════
+// CONFIG
+// ═══════════════════════════════════════════════════
+
+const GEMINI_MODELS = {
+   primary: "gemini-2.5-pro",
+  secondary: "gemini-2.5-flash",
+  tertiary: "gemini-2.5-flash-lite",
+} as const;
+
+const MAX_OUTPUT_TOKENS = 32000;
+const MAX_REPAIR_TOKENS = 16000;
+const MAX_RETRIES_PER_MODEL = 2;
 
 // ═══════════════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════════════
 
-interface GeneratorPart1 {
-  templateType: string;
-  sceneConfig: {
-    algorithmName:     string;
-    timeComplexity:    string;
-    spaceComplexity?:  string;
-    stats:             any[];
-    boldKeywords:      string[];
-    baseInterval:      number;
-    completionConfig?: any;
+export interface GeneratorOutput {
+  html: string;
+  model: string;
+  repaired: boolean;
+  truncated: boolean;
+}
+
+// ═══════════════════════════════════════════════════
+// ENV / KEY HELPERS
+// ═══════════════════════════════════════════════════
+
+function getGeminiApiKeys(): string[] {
+  const single = process.env.GEMINI_API_KEY?.trim() || "";
+  const multiRaw = process.env.GEMINI_API_KEYS?.trim() || "";
+
+  const multi = multiRaw
+    .split(/[,\n]/)
+    .map((key) => key.trim())
+    .filter(Boolean);
+
+  const keys = [...(single ? [single] : []), ...multi];
+  const unique = Array.from(new Set(keys));
+
+  if (unique.length === 0) {
+    throw new Error(
+      "Gemini API key not configured. Add GEMINI_API_KEY or GEMINI_API_KEYS in .env.local"
+    );
+  }
+
+  return unique;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : String(error).toLowerCase();
+
+  return (
+    message.includes("429") ||
+    message.includes("quota") ||
+    message.includes("rate limit") ||
+    message.includes("resource exhausted") ||
+    message.includes("503") ||
+    message.includes("500") ||
+    message.includes("overloaded") ||
+    message.includes("timeout") ||
+    message.includes("unavailable")
+  );
+}
+
+// ═══════════════════════════════════════════════════
+// HTML EXTRACTION + VALIDATION
+// ═══════════════════════════════════════════════════
+
+function extractHTML(rawText: string): string {
+  let text = rawText.trim();
+
+  // Remove think tags
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+
+  // Remove markdown fences
+  text = text.replace(/^```html\s*/i, "").replace(/^```\s*/i, "");
+  text = text.replace(/```\s*$/i, "");
+  text = text.trim();
+
+  // Try to find <!DOCTYPE or <html
+  const doctypeIndex = text.search(/<!DOCTYPE\s+html/i);
+  const htmlIndex = text.search(/<html/i);
+  const startIndex = doctypeIndex !== -1 ? doctypeIndex : htmlIndex;
+
+  if (startIndex > 0) {
+    text = text.slice(startIndex);
+  }
+
+  // Try to find </html>
+  const htmlEndIndex = text.lastIndexOf("</html>");
+  if (htmlEndIndex !== -1) {
+    text = text.slice(0, htmlEndIndex + 7);
+  }
+
+  return text.trim();
+}
+
+function isHTMLComplete(html: string): boolean {
+  const lower = html.toLowerCase();
+
+  const hasDoctype = /<!doctype\s+html/i.test(html);
+  const hasHtmlOpen = /<html/i.test(html);
+  const hasHtmlClose = lower.includes("</html>");
+  const hasHead = /<head/i.test(html) && lower.includes("</head>");
+  const hasBody = /<body/i.test(html) && lower.includes("</body>");
+  const hasStyle = /<style/i.test(html) && lower.includes("</style>");
+  const hasScript = /<script/i.test(html) && lower.includes("</script>");
+
+  return hasHtmlOpen && hasHtmlClose && hasBody && hasStyle && hasScript;
+}
+
+function isTruncated(html: string): boolean {
+  const lower = html.toLowerCase().trim();
+
+  // Missing closing tags
+  if (!lower.includes("</html>")) return true;
+  if (!lower.includes("</script>")) return true;
+  if (!lower.includes("</body>")) return true;
+
+  // Ends abruptly
+  if (lower.endsWith("...")) return true;
+  if (lower.endsWith("//")) return true;
+  if (lower.endsWith("/*")) return true;
+
+  // Unclosed braces in last script
+  const lastScriptStart = html.lastIndexOf("<script");
+  const lastScriptEnd = html.lastIndexOf("</script>");
+
+  if (lastScriptStart !== -1 && lastScriptEnd > lastScriptStart) {
+    const scriptContent = html.slice(lastScriptStart, lastScriptEnd);
+    const openBraces = (scriptContent.match(/\{/g) || []).length;
+    const closeBraces = (scriptContent.match(/\}/g) || []).length;
+
+    if (openBraces - closeBraces > 3) return true;
+  }
+
+  return false;
+}
+
+function hasMinimumContent(html: string): boolean {
+  // Must have reasonable length
+  if (html.length < 500) return false;
+
+  // Must have some CSS
+  const styleMatch = html.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
+  if (!styleMatch || styleMatch[1].trim().length < 50) return false;
+
+  // Must have some JS
+  const scriptMatch = html.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
+  if (!scriptMatch || scriptMatch[1].trim().length < 100) return false;
+
+  return true;
+}
+
+function validateHTML(html: string): {
+  valid: boolean;
+  complete: boolean;
+  truncated: boolean;
+  issues: string[];
+} {
+  const issues: string[] = [];
+  const complete = isHTMLComplete(html);
+  const truncated = isTruncated(html);
+  const hasContent = hasMinimumContent(html);
+
+  if (!complete) issues.push("HTML structure incomplete");
+  if (truncated) issues.push("HTML appears truncated");
+  if (!hasContent) issues.push("HTML has insufficient content");
+
+  return {
+    valid: hasContent,
+    complete,
+    truncated,
+    issues,
   };
 }
 
-// Part 2 = plain text CSS string (no interface needed)
-
-
-
 // ═══════════════════════════════════════════════════
-// JSON PARSER
+// REPAIR SYSTEM
 // ═══════════════════════════════════════════════════
 
-function parseJSON<T>(text: string, label: string): T {
-  if (!text || text.trim().length === 0) {
-    throw new Error(`Empty response from ${label}`);
-  }
+function buildRepairPrompt(
+  brokenHTML: string,
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  // Take the last portion of HTML to identify where it broke
+  const lastPart = brokenHTML.slice(-2000);
 
-  let clean = text.trim();
-  clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-  clean = clean.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-  clean = fixJSONEscaping(clean);
+  return `
+You are an expert HTML repair AI.
 
-  try {
-    return JSON.parse(clean) as T;
-  } catch {
-    const start = clean.indexOf('{');
-    const end   = clean.lastIndexOf('}');
-    if (start !== -1 && end !== -1 && end > start) {
+The following HTML visualization was cut off / truncated during generation.
+Your job is to COMPLETE it — not restart it.
+
+ALGORITHM: ${analysis.algorithmName}
+SCENE: ${creativeDirection.sceneName}
+METAPHOR: ${creativeDirection.metaphor}
+
+The HTML so far ends with:
+\`\`\`
+${lastPart}
+\`\`\`
+
+RULES:
+1. Output ONLY the REMAINING part that completes the HTML
+2. Start exactly where it was cut off
+3. Close all open tags, braces, functions
+4. Make sure the final output includes:
+   - closing </script> tag
+   - closing </body> tag
+   - closing </html> tag
+5. If renderScene() or initVisualization() was cut, complete them
+6. If window.STEPS array was cut, complete it with remaining steps
+7. Do NOT restart the HTML from scratch
+8. Do NOT include <!DOCTYPE> or <html> — only the remaining completion part
+
+Output ONLY the completion code. No markdown. No explanation.
+`.trim();
+}
+
+async function repairHTML(
+  brokenHTML: string,
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): Promise<string | null> {
+  const keys = getGeminiApiKeys();
+  const repairPrompt = buildRepairPrompt(brokenHTML, analysis, creativeDirection);
+  const models = [GEMINI_MODELS.primary, GEMINI_MODELS.secondary];
+
+  for (const model of models) {
+    for (const key of keys) {
       try {
-        return JSON.parse(clean.slice(start, end + 1)) as T;
-      } catch (e) {
-        throw new Error(
-          `Failed to parse ${label} JSON: ${
-            e instanceof Error ? e.message : String(e)
-          }`
+        console.log(`[Generator] Attempting repair via ${model}...`);
+
+        const client = new GoogleGenAI({ apiKey: key });
+
+        const response = await client.models.generateContent({
+          model,
+          contents: repairPrompt,
+          config: {
+            temperature: 0.1,
+            maxOutputTokens: MAX_REPAIR_TOKENS,
+          },
+        });
+
+        const completionText = response.text;
+
+        if (!completionText || completionText.trim().length < 20) {
+          console.warn("[Generator] Repair response too short, skipping");
+          continue;
+        }
+
+        let completion = completionText.trim();
+
+        // Remove markdown fences
+        completion = completion
+          .replace(/^```(?:html|javascript|js)?\s*/i, "")
+          .replace(/```\s*$/i, "")
+          .trim();
+
+        // Find where to stitch
+        // Remove any overlap with original
+        const repairedHTML = stitchHTML(brokenHTML, completion);
+        const validation = validateHTML(repairedHTML);
+
+        if (validation.valid && validation.complete) {
+          console.log(`[Generator] ✅ Repair successful via ${model}`);
+          return repairedHTML;
+        }
+
+        console.warn(
+          `[Generator] Repair via ${model} did not fully fix:`,
+          validation.issues
+        );
+      } catch (error) {
+        console.warn(
+          `[Generator] Repair failed via ${model}:`,
+          error instanceof Error ? error.message : String(error)
         );
       }
     }
-    throw new Error(`No valid JSON found in ${label} response`);
   }
+
+  return null;
 }
 
-function fixJSONEscaping(text: string): string {
-  try {
-    JSON.parse(text);
-    return text;
-  } catch {
-    let result   = '';
-    let inString = false;
-    let escaped  = false;
+function stitchHTML(original: string, completion: string): string {
+  let combined = original;
 
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i];
+  // If completion starts with closing tags or continuation code
+  // just append it
+  const trimmedCompletion = completion.trim();
 
-      if (escaped) {
-        result  += ch;
-        escaped  = false;
-        continue;
-      }
+  // Check for overlap (last 100 chars of original vs first 100 of completion)
+  const overlapCheckLength = Math.min(100, original.length, trimmedCompletion.length);
+  const originalEnd = original.slice(-overlapCheckLength);
 
-      if (ch === '\\') {
-        escaped = true;
-        result += ch;
-        continue;
-      }
-
-      if (ch === '"') {
-        inString = !inString;
-        result  += ch;
-        continue;
-      }
-
-      if (inString) {
-        if (ch === '\n')      { result += '\\n';  continue; }
-        if (ch === '\r')      { result += '\\r';  continue; }
-        if (ch === '\t')      { result += '\\t';  continue; }
-        const code = ch.charCodeAt(0);
-        if (code < 32) {
-          result += '\\u' + code.toString(16).padStart(4, '0');
-          continue;
-        }
-      }
-
-      result += ch;
-    }
-
-    return result;
-  }
-}
-
-// ═══════════════════════════════════════════════════
-// SCRIPT EXTRACTOR — Plain text JS response
-// ═══════════════════════════════════════════════════
-
-function extractScript(text: string, label: string): string {
-  if (!text || text.trim().length === 0) {
-    throw new Error(`Empty script response from ${label}`);
-  }
-
-  let clean = text.trim();
-
-  // Strip think tags
-  clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-
-  // Strip markdown fences
-  const fenceMatch = clean.match(/```(?:javascript|js)?\s*([\s\S]*?)```/i);
-  if (fenceMatch) return fenceMatch[1].trim();
-
-  // Strip JSON wrapper if model wrapped it anyway
-  // { "sceneScript": "..." }
-  if (clean.startsWith('{') && clean.includes('sceneScript')) {
-    try {
-      const parsed = JSON.parse(clean);
-      if (parsed.sceneScript) return parsed.sceneScript;
-    } catch {
-      // Try extracting value manually
-      const match = clean.match(/"sceneScript"\s*:\s*"([\s\S]*?)"\s*\}/);
-      if (match) return match[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+  // Find if completion starts with something already in original
+  let overlapIndex = -1;
+  for (let len = overlapCheckLength; len >= 10; len--) {
+    const chunk = originalEnd.slice(-len);
+    if (trimmedCompletion.startsWith(chunk)) {
+      overlapIndex = len;
+      break;
     }
   }
 
-  return clean;
-}
-
-function validateScript(script: string, label: string): void {
-  if (!script || script.trim().length < 100) {
-    throw new Error(`${label}: script too short`);
-  }
-  if (!script.includes('STEPS') && !script.includes('window.STEPS')) {
-    throw new Error(`${label}: missing STEPS`);
-  }
-  if (!script.includes('renderScene')) {
-    throw new Error(`${label}: missing renderScene`);
-  }
-  if (!script.includes('initVisualization')) {
-    throw new Error(`${label}: missing initVisualization`);
-  }
-}
-
-// ═══════════════════════════════════════════════════
-// CSS EXTRACTOR — Plain text response
-// ═══════════════════════════════════════════════════
-
-function extractCSS(text: string, label: string): string {
-  if (!text || text.trim().length === 0) {
-    throw new Error(`Empty CSS response from ${label}`);
+  if (overlapIndex > 0) {
+    // Remove overlap
+    combined = original + trimmedCompletion.slice(overlapIndex);
+  } else {
+    combined = original + "\n" + trimmedCompletion;
   }
 
-  let clean = text.trim();
+  // Ensure proper closing
+  const lower = combined.toLowerCase();
+  if (!lower.includes("</script>") && lower.includes("<script")) {
+    combined += "\n</script>";
+  }
+  if (!lower.includes("</body>")) {
+    combined += "\n</body>";
+  }
+  if (!lower.includes("</html>")) {
+    combined += "\n</html>";
+  }
 
-  // Strip think tags
-  clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-
-  // Strip markdown fences
-  const fenceMatch = clean.match(/```(?:css)?\s*([\s\S]*?)```/i);
-  if (fenceMatch) return fenceMatch[1].trim();
-
-  // Strip <style> tags if present
-  const styleMatch = clean.match(/<style[^>]*>([\s\S]*?)<\/style>/i);
-  if (styleMatch) return styleMatch[1].trim();
-
-  // Return as-is (plain CSS)
-  return clean;
+  return combined;
 }
 
 // ═══════════════════════════════════════════════════
-// VALIDATORS
+// MAIN GEMINI HTML GENERATOR
 // ═══════════════════════════════════════════════════
 
-function validatePart1(part1: GeneratorPart1, label: string): void {
-  const validTemplates = ['array','graph','tree','dp','stackqueue','recursion'];
-  if (!part1.templateType || !validTemplates.includes(part1.templateType)) {
-    throw new Error(`${label}: invalid templateType "${part1.templateType}"`);
-  }
-  if (!part1.sceneConfig || !part1.sceneConfig.algorithmName) {
-    throw new Error(`${label}: missing sceneConfig`);
-  }
-  if (!Array.isArray(part1.sceneConfig.stats)) {
-    throw new Error(`${label}: missing stats array`);
-  }
-}
-
-function validateCSS(css: string, label: string): void {
-  if (!css || css.trim().length < 10) {
-    throw new Error(`${label}: CSS too short or empty`);
-  }
-}
-
-function validatePart3(part3: GeneratorPart3, label: string): void {
-  if (!part3.sceneScript || part3.sceneScript.trim().length < 100) {
-    throw new Error(`${label}: missing or too-short sceneScript`);
-  }
-  if (!part3.sceneScript.includes('window.STEPS') &&
-      !part3.sceneScript.includes('STEPS =')) {
-    throw new Error(`${label}: sceneScript missing STEPS`);
-  }
-  if (!part3.sceneScript.includes('renderScene')) {
-    throw new Error(`${label}: sceneScript missing renderScene`);
-  }
-  if (!part3.sceneScript.includes('initVisualization')) {
-    throw new Error(`${label}: sceneScript missing initVisualization`);
-  }
-}
-
-// ═══════════════════════════════════════════════════
-// NORMALIZERS
-// ═══════════════════════════════════════════════════
-
-function normalizePart1(
-  part1:         GeneratorPart1,
-  analysis:      AnalysisResult,
-  technicalSpec: TechnicalSpec
-): GeneratorPart1 {
-  const validTemplates: TemplateType[] = [
-    'array','graph','tree','dp','stackqueue','recursion'
-  ];
-
-  if (!validTemplates.includes(part1.templateType as TemplateType)) {
-    part1.templateType = technicalSpec.templateType || 'array';
-  }
-
-  if (!part1.sceneConfig) {
-    part1.sceneConfig = {
-      algorithmName:   analysis.algorithmName,
-      timeComplexity:  analysis.timeComplexity,
-      spaceComplexity: analysis.spaceComplexity || '',
-      stats: [
-        { key: 'comparisons', label: 'Comparisons', value: 0, side: 'left'  },
-        { key: 'swaps',       label: 'Swaps',       value: 0, side: 'left'  },
-        { key: 'currentStep', label: 'Step',        value: 0, side: 'right' },
-      ],
-      boldKeywords: [],
-      baseInterval: technicalSpec.baseInterval || 1200,
-    };
-  }
-
-  // Ensure required fields
-  part1.sceneConfig.algorithmName   = part1.sceneConfig.algorithmName   || analysis.algorithmName;
-  part1.sceneConfig.timeComplexity  = part1.sceneConfig.timeComplexity  || analysis.timeComplexity;
-  part1.sceneConfig.spaceComplexity = part1.sceneConfig.spaceComplexity || analysis.spaceComplexity || '';
-  part1.sceneConfig.boldKeywords    = part1.sceneConfig.boldKeywords    || [];
-  part1.sceneConfig.baseInterval    = part1.sceneConfig.baseInterval    || 1200;
-
-  if (!Array.isArray(part1.sceneConfig.stats) || part1.sceneConfig.stats.length === 0) {
-    part1.sceneConfig.stats = [
-      { key: 'comparisons', label: 'Comparisons', value: 0, side: 'left'  },
-      { key: 'swaps',       label: 'Swaps',       value: 0, side: 'left'  },
-      { key: 'currentStep', label: 'Step',        value: 0, side: 'right' },
-    ];
-  }
-
-  return part1;
-}
-
-function normalizePart3(part3: GeneratorPart3): GeneratorPart3 {
-  if (part3.sceneScript) {
-    part3.sceneScript = part3.sceneScript
-      .replace(/<think>[\s\S]*?<\/think>/gi, '')
-      .replace(/^```(?:javascript|js)?\s*/i, '')
-      .replace(/```\s*$/i, '')
-      .trim();
-  }
-  return part3;
-}
-
-// ═══════════════════════════════════════════════════
-// GEMINI CALLER
-// ═══════════════════════════════════════════════════
-
-async function callGeminiJSON<T>(
-  modelName:  string,
-  prompt:     string,
-  label:      string,
-  maxTokens:  number = 4000
-): Promise<T> {
-  return callWithGeminiRotation(modelName, async (apiKey) => {
-    const ai = new GoogleGenAI({ apiKey });
-
-    const response = await ai.models.generateContent({
-      model:    modelName,
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        maxOutputTokens:  maxTokens,
-      },
-    });
-
-    const text = response.text;
-    if (!text || text.trim().length === 0) {
-      throw new Error(`Empty response from ${label}`);
-    }
-
-    return parseJSON<T>(text, label);
-  }, GEMINI_RETRY_CONFIG);
-}
-
-async function callGeminiText(
-  modelName:  string,
-  prompt:     string,
-  label:      string,
-  maxTokens:  number = 4000
+async function callGeminiGenerator(
+  apiKey: string,
+  model: string,
+  prompt: string
 ): Promise<string> {
-  return callWithGeminiRotation(modelName, async (apiKey) => {
-    const ai = new GoogleGenAI({ apiKey });
+  const client = new GoogleGenAI({ apiKey });
 
-    const response = await ai.models.generateContent({
-      model:    modelName,
-      contents: prompt,
-      config: {
-        maxOutputTokens: maxTokens,
-      },
-    });
-
-    const text = response.text;
-    if (!text || text.trim().length === 0) {
-      throw new Error(`Empty response from ${label}`);
-    }
-
-    return text;
-  }, GEMINI_RETRY_CONFIG);
-}
-
-// ═══════════════════════════════════════════════════
-// GROQ CALLERS
-// ═══════════════════════════════════════════════════
-
-async function callGroqJSON<T>(
-  systemPrompt: string,
-  userPrompt:   string,
-  label:        string,
-  maxTokens:    number = 4000
-): Promise<T> {
-  const groq = new Groq({ apiKey: getGroqKey() });
-
-  const completion = await groq.chat.completions.create({
-    model: MODELS.groq.llama70B,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user',   content: userPrompt   },
-    ],
-    temperature: 0.2,
-    max_tokens:  maxTokens,
+  const response = await client.models.generateContent({
+    model,
+    contents: prompt,
+    config: {
+      temperature: 0.3,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
+    },
   });
 
-  const text = completion.choices[0]?.message?.content;
-  return parseJSON<T>(text || '', label);
-}
+  const text = response.text;
 
-async function callGroqText(
-  systemPrompt: string,
-  userPrompt:   string,
-  label:        string,
-  maxTokens:    number = 4000
-): Promise<string> {
-  const groq = new Groq({ apiKey: getGroqKey() });
+  if (!text || text.trim().length === 0) {
+    throw new Error(`Empty response from Gemini ${model}`);
+  }
 
-  const completion = await groq.chat.completions.create({
-    model: MODELS.groq.llama70B,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user',   content: userPrompt   },
-    ],
-    temperature: 0.2,
-    max_tokens:  maxTokens,
-  });
-
-  const text = completion.choices[0]?.message?.content;
-  if (!text) throw new Error(`Empty response from ${label}`);
   return text;
 }
 
-// ═══════════════════════════════════════════════════
-// PART 1 SYSTEM PROMPT — Config + templateType only
-// ═══════════════════════════════════════════════════
+async function runGenerator(
+  prompt: string
+): Promise<{ rawHTML: string; model: string }> {
+  const keys = getGeminiApiKeys();
+  const modelOrder = [
+    GEMINI_MODELS.primary,
+    GEMINI_MODELS.secondary,
+    GEMINI_MODELS.tertiary,
+  ];
 
-function buildPart1SystemPrompt(): string {
-  return `You are a technical architect for algorithm visualizations.
+  let lastError: unknown = null;
 
-Generate the CONFIGURATION for a visualization. No CSS, no HTML, no JavaScript.
+  for (const model of modelOrder) {
+    for (let attempt = 1; attempt <= MAX_RETRIES_PER_MODEL; attempt++) {
+      for (const key of keys) {
+        try {
+          console.log(
+            `[Generator] Trying ${model} (attempt ${attempt})...`
+          );
 
-Return ONLY a valid JSON object:
+          const rawText = await callGeminiGenerator(key, model, prompt);
+          const html = extractHTML(rawText);
 
-{
-  "templateType": "array | graph | tree | dp | stackqueue | recursion",
-  "sceneConfig": {
-    "algorithmName": "string",
-    "timeComplexity": "string",
-    "spaceComplexity": "string",
-    "stats": [
-      { "key": "string", "label": "string", "value": 0, "side": "left | right" }
-    ],
-    "boldKeywords": ["word1", "word2"],
-    "baseInterval": 1200,
-    "completionConfig": {
-      "emoji": "🎉",
-      "title": "string",
-      "subtitle": "string",
-      "stats": []
+          if (!hasMinimumContent(html)) {
+            console.warn(
+              `[Generator] ${model} returned insufficient content, trying next...`
+            );
+            continue;
+          }
+
+          console.log(
+            `[Generator] ✅ Got HTML from ${model} — ${html.length} chars`
+          );
+
+          return { rawHTML: html, model };
+        } catch (error) {
+          lastError = error;
+
+          console.warn(
+            `[Generator] ${model} attempt ${attempt} failed:`,
+            error instanceof Error ? error.message : String(error)
+          );
+
+          if (isRetryableError(error)) {
+            await sleep(800 * attempt);
+            continue;
+          }
+        }
+      }
     }
   }
-}
 
-RULES:
-1. Return ONLY the JSON object
-2. No text before or after
-3. No markdown
-4. Choose templateType based on algorithm category
-5. stats should reflect the algorithm (comparisons/swaps for sorting, etc.)
-6. boldKeywords = important algorithm-specific words for caption highlighting
-7. baseInterval = ms between steps (slower for complex algorithms)`;
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("All Gemini generator attempts failed");
 }
 
 // ═══════════════════════════════════════════════════
-// PART 2 SYSTEM PROMPT — CSS only (plain text)
+// FALLBACK HTML
+// If everything fails, return a basic but functional HTML
 // ═══════════════════════════════════════════════════
 
-function buildPart2SystemPrompt(
-  part1:         GeneratorPart1,
-  creativeScene: CreativeScene,
-  analysis:      AnalysisResult
+function buildFallbackHTML(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
 ): string {
-  return `You are an expert CSS designer for algorithm visualizations.
+  const steps = Array.isArray((analysis as any).steps)
+    ? (analysis as any).steps
+    : [];
 
-Generate ONLY the CSS for this visualization. No JavaScript. No HTML. No JSON.
+  const stepsJSON = JSON.stringify(
+    steps.map((s: any, i: number) => ({
+      step: s.step ?? i + 1,
+      caption: s.caption ?? s.description ?? `Step ${i + 1}`,
+      action: s.action ?? "process",
+      variables: s.variables ?? {},
+      important: s.important ?? false,
+    }))
+  );
 
-ALGORITHM: ${analysis.algorithmName}
-CATEGORY:  ${analysis.category}
-TEMPLATE:  ${part1.templateType}
-SCENE:     ${creativeScene.sceneName}
-METAPHOR:  ${creativeScene.metaphor}
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>${analysis.algorithmName} Visualization</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: ${creativeDirection.colorPalette.background};
+    color: #e2e8f0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .header {
+    padding: 16px 24px;
+    background: rgba(255,255,255,0.03);
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .header h1 {
+    font-size: 18px;
+    color: ${creativeDirection.colorPalette.accent};
+  }
+  .header .meta {
+    font-size: 12px;
+    color: #94a3b8;
+  }
+  .scene {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 24px;
+    padding: 32px;
+    position: relative;
+  }
+  .scene-title {
+    font-size: 24px;
+    font-weight: 700;
+    color: ${creativeDirection.colorPalette.primary};
+  }
+  .scene-metaphor {
+    font-size: 14px;
+    color: #94a3b8;
+    max-width: 600px;
+    text-align: center;
+    line-height: 1.6;
+  }
+  .caption-bar {
+    padding: 16px 24px;
+    min-height: 72px;
+    background: rgba(255,255,255,0.03);
+    border-top: 1px solid rgba(255,255,255,0.08);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-size: 15px;
+    line-height: 1.5;
+    color: #cbd5e1;
+  }
+  .controls {
+    padding: 12px 24px;
+    background: rgba(255,255,255,0.02);
+    border-top: 1px solid rgba(255,255,255,0.06);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+  }
+  .controls button {
+    padding: 8px 18px;
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    background: rgba(255,255,255,0.05);
+    color: #e2e8f0;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.2s;
+  }
+  .controls button:hover {
+    background: rgba(255,255,255,0.12);
+  }
+  .controls button.active {
+    background: ${creativeDirection.colorPalette.accent};
+    color: #0d1117;
+    border-color: ${creativeDirection.colorPalette.accent};
+  }
+  .step-counter {
+    font-size: 13px;
+    color: #94a3b8;
+    min-width: 80px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>${analysis.algorithmName}</h1>
+    <span class="meta">${analysis.category} · ${analysis.timeComplexity}</span>
+  </div>
+  <div class="scene">
+    <div class="scene-title">${creativeDirection.sceneName}</div>
+    <div class="scene-metaphor">${creativeDirection.metaphor}</div>
+  </div>
+  <div class="caption-bar" id="caption">Loading visualization...</div>
+  <div class="controls">
+    <button onclick="reset()">⟲ Reset</button>
+    <button onclick="prev()">◂ Prev</button>
+    <button onclick="togglePlay()" id="playBtn">▶ Play</button>
+    <button onclick="next()">Next ▸</button>
+    <span class="step-counter" id="stepCounter">0 / 0</span>
+    <button onclick="setSpeed(0.5)">0.5x</button>
+    <button onclick="setSpeed(1)" class="active" id="speed1">1x</button>
+    <button onclick="setSpeed(2)">2x</button>
+  </div>
+<script>
+  const STEPS = ${stepsJSON};
+  let currentStep = -1;
+  let playing = false;
+  let playInterval = null;
+  let speed = 1;
+  const caption = document.getElementById('caption');
+  const stepCounter = document.getElementById('stepCounter');
+  const playBtn = document.getElementById('playBtn');
 
-HERO CHARACTER:
-  Type: ${creativeScene.heroCharacter.type}
-  Look: ${creativeScene.heroCharacter.look}
+  function showStep(index) {
+    if (index < 0 || index >= STEPS.length) return;
+    currentStep = index;
+    const step = STEPS[currentStep];
+    caption.textContent = step.caption;
+    stepCounter.textContent = (currentStep + 1) + ' / ' + STEPS.length;
+  }
 
-ENVIRONMENT:
-  Setting: ${creativeScene.environment.setting}
-  Layers:  ${creativeScene.environment.backgroundLayers.join(', ')}
-  Ambient: ${creativeScene.environment.ambientEffects.join(', ')}
+  function next() {
+    if (currentStep < STEPS.length - 1) showStep(currentStep + 1);
+    else stopPlay();
+  }
 
-COLOR PALETTE:
-  primary:    ${creativeScene.colorPalette.primary}
-  secondary:  ${creativeScene.colorPalette.secondary}
-  accent:     ${creativeScene.colorPalette.accent}
-  danger:     ${creativeScene.colorPalette.danger}
-  background: ${creativeScene.colorPalette.background}
+  function prev() {
+    if (currentStep > 0) showStep(currentStep - 1);
+  }
 
-OBJECT MAPPING:
-${Object.entries(creativeScene.objectMapping).map(([k,v]) => `  ${k} = ${v}`).join('\n')}
+  function reset() {
+    stopPlay();
+    currentStep = -1;
+    caption.textContent = 'Click Play or Next to begin.';
+    stepCounter.textContent = '0 / ' + STEPS.length;
+  }
 
-WHAT TO STYLE (be specific and creative):
-1. Scene background — match the environment setting
-2. Background layers — create depth (parallax-ready classes)
-3. Array bars / main elements — themed to the metaphor
-4. Active element state — glowing, highlighted
-5. Sorted/complete element state — victory styling
-6. Hero character — position, size, emoji/visual
-7. Pointer/marker styles
-8. Ambient effects — CSS animations for environment
-9. Any scene-specific decorative elements
+  function togglePlay() {
+    if (playing) stopPlay();
+    else startPlay();
+  }
 
-NON-NEGOTIABLE VISUAL REQUIREMENTS:
-${creativeScene.nonNegotiableVisualRequirements.map((r,i) => `${i+1}. ${r}`).join('\n')}
+  function startPlay() {
+    playing = true;
+    playBtn.textContent = '⏸ Pause';
+    if (currentStep < 0) showStep(0);
+    playInterval = setInterval(() => { next(); }, 1200 / speed);
+  }
 
-RULES:
-1. Return ONLY raw CSS — no <style> tags, no JSON, no explanation
-2. Use the exact color palette provided
-3. Use CSS variables: --scene-primary, --scene-secondary, --scene-accent, --scene-danger, --scene-bg
-4. Make it cinematic and thematic — not generic
-5. Include CSS @keyframes for ambient animations
-6. CSS classes must match what the JavaScript will use`;
-}
+  function stopPlay() {
+    playing = false;
+    playBtn.textContent = '▶ Play';
+    if (playInterval) { clearInterval(playInterval); playInterval = null; }
+  }
 
-// ═══════════════════════════════════════════════════
-// PART 3 SYSTEM PROMPT — sceneScript only
-// ═══════════════════════════════════════════════════
+  function setSpeed(s) {
+    speed = s;
+    document.querySelectorAll('.controls button').forEach(b => b.classList.remove('active'));
+    if (playing) { stopPlay(); startPlay(); }
+  }
 
-function buildPart3SystemPrompt(
-  part1:         GeneratorPart1,
-  creativeScene: CreativeScene,
-  analysis:      AnalysisResult
-): string {
+  // Keyboard controls
+  document.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+    if (e.code === 'ArrowRight') next();
+    if (e.code === 'ArrowLeft') prev();
+    if (e.code === 'KeyR') reset();
+  });
 
-  // Compact steps — only essential fields
-  const stepsCompact = analysis.steps.map(s => ({
-    step:      s.step,
-    action:    s.action,
-    caption:   s.caption,
-    vars:      s.variables,
-    important: s.important,
-  }));
-
-  return `You are an expert JavaScript animation coder for algorithm visualizations.
-
-Generate ONLY raw JavaScript code. No JSON wrapper. No explanation. No markdown.
-Return pure JavaScript that will be injected directly into a <script> tag.
-
-ALGORITHM: ${analysis.algorithmName}
-CATEGORY:  ${analysis.category}
-TEMPLATE:  ${part1.templateType}
-SCENE:     ${creativeScene.sceneName}
-METAPHOR:  ${creativeScene.metaphor}
-
-HERO CHARACTER:
-  Type:  ${creativeScene.heroCharacter.type}
-  Look:  ${creativeScene.heroCharacter.look}
-  Idle:  ${creativeScene.heroCharacter.idleAnimation}
-  Move:  ${creativeScene.heroCharacter.moveAnimation}
-
-ENVIRONMENT:
-  Setting: ${creativeScene.environment.setting}
-  Layers:  ${creativeScene.environment.backgroundLayers.join(', ')}
-  Ambient: ${creativeScene.environment.ambientEffects.join(', ')}
-
-OBJECT MAPPING:
-${Object.entries(creativeScene.objectMapping).map(([k,v]) => `  ${k} = ${v}`).join('\n')}
-
-STEP TO SCENE:
-${creativeScene.stepToSceneMapping.map(s => `  [${s.stepType}] → ${s.visual} via ${s.animation}`).join('\n')}
-
-DRAMATIC MOMENTS:
-${creativeScene.dramaticMoments.map((d,i) => `  ${i+1}. ${d}`).join('\n')}
-
-NON-NEGOTIABLE VISUAL REQUIREMENTS:
-${creativeScene.nonNegotiableVisualRequirements.map((r,i) => `${i+1}. ${r}`).join('\n')}
-
-STATS AVAILABLE: ${part1.sceneConfig.stats.map((s:any) => s.key).join(', ')}
-BASE INTERVAL: ${part1.sceneConfig.baseInterval}ms
-
-PREBUILT FRAMEWORK — call directly, do NOT redefine:
-  initVisualization(config), renderStep(index)
-  setCaption(text, i, imp), showImportantCaption(text, i)
-  updateStat(key, value), updateVariables(vars)
-  clearScene(), getSceneDimensions()
-  createElement(tag, attrs, styles, parent), addToScene(el)
-
-Animation utilities:
-  moveTo, moveArc, moveArcHigh, springTo
-  fadeIn, fadeOut, fadeInUp, fadeInScale
-  highlight, glowPulse, glowFlash, spotlight, neonFlicker
-  popIn, popOut, breathe, squashAndStretch
-  shake, wobble, jello, spin
-  typeWords, countUp, valueChange, dramaticText
-  splashBurst, confettiBurst, ripple, shockwave, sparkle, bubbles
-  waterFill, waterRipple, waterSplash, waterDrop
-  drawLine, drawArc, drawArrow, connectionBeam
-  zoomIn, zoomOut, cameraShake, focusOn
-  markSorted, markActive, markVisited, markCurrent, markError, markInactive
-  characterIdle, characterJump, characterCelebrate, characterWalk
-  celebrationWave, victoryBurst, goldOutline, finalReveal
-  stagger, sequence, chainAnimations, delay
-
-STEPS DATA (${analysis.steps.length} total):
-${JSON.stringify(stepsCompact, null, 2)}
-
-YOUR OUTPUT MUST CONTAIN:
-1. window.STEPS = [...] — ALL ${analysis.steps.length} steps
-2. function renderScene(step, index) { ... }
-   - handles ALL actions: ${[...new Set(analysis.steps.map(s => s.action))].join(', ')}
-   - animates hero character per step
-   - calls updateStat() and updateVariables()
-   - uses animation utilities
-3. initVisualization({
-     steps: window.STEPS,
-     algorithmName: '${part1.sceneConfig.algorithmName}',
-     timeComplexity: '${part1.sceneConfig.timeComplexity}',
-     spaceComplexity: '${part1.sceneConfig.spaceComplexity || ''}',
-     stats: ${JSON.stringify(part1.sceneConfig.stats)},
-     boldKeywords: ${JSON.stringify(part1.sceneConfig.boldKeywords)},
-     baseInterval: ${part1.sceneConfig.baseInterval},
-     completionConfig: ${JSON.stringify(part1.sceneConfig.completionConfig || {
-       emoji: '🎉',
-       title: part1.sceneConfig.algorithmName + ' Complete!',
-       subtitle: 'Algorithm finished successfully.',
-       stats: []
-     })},
-     onInit: function() {
-       // Build initial scene DOM
-       // Create hero character
-       // Create environment layers
-       // Create array bars or main elements
-     }
-   });
-
-RETURN ONLY RAW JAVASCRIPT. No JSON. No markdown. No explanation.`;
-}
-// ═══════════════════════════════════════════════════
-// PART 1 CHAIN — Config + templateType (JSON)
-// ═══════════════════════════════════════════════════
-
-function buildPart1Chain(
-  compactPrompt:  string,
-  analysis:       AnalysisResult,
-  technicalSpec:  TechnicalSpec
-): ModelFn<GeneratorPart1>[] {
-  const systemPrompt = buildPart1SystemPrompt();
-  const prompt       = `${systemPrompt}
-
-ALGORITHM DETAILS:
-Name:          ${analysis.algorithmName}
-Category:      ${analysis.category}
-Time:          ${analysis.timeComplexity}
-Space:         ${analysis.spaceComplexity || 'O(n)'}
-Steps count:   ${analysis.steps.length}
-Template type: ${technicalSpec.templateType}
-Stats needed:  Based on category — comparisons/swaps for sorting, etc.`;
-
-  return [
-    {
-      name: 'Gemini Flash (Config)',
-      fn: async () => {
-        const part1 = await callGeminiJSON<GeneratorPart1>(
-          MODELS.gemini.flash,
-          prompt,
-          'Gemini Flash Config',
-          2000
-        );
-        validatePart1(part1, 'Gemini Flash Config');
-        return normalizePart1(part1, analysis, technicalSpec);
-      },
-    },
-    {
-      name: 'Gemini Flash Lite (Config)',
-      fn: async () => {
-        const part1 = await callGeminiJSON<GeneratorPart1>(
-          MODELS.gemini.flashLite,
-          prompt,
-          'Gemini Flash Lite Config',
-          2000
-        );
-        validatePart1(part1, 'Gemini Flash Lite Config');
-        return normalizePart1(part1, analysis, technicalSpec);
-      },
-    },
-    {
-      name: 'Groq (Config)',
-      fn: async () => {
-        const part1 = await callGroqJSON<GeneratorPart1>(
-          systemPrompt,
-          `ALGORITHM CONTEXT:\n${compactPrompt}`,
-          'Groq Config',
-          2000
-        );
-        validatePart1(part1, 'Groq Config');
-        return normalizePart1(part1, analysis, technicalSpec);
-      },
-    },
-  ];
-}
-
-// ═══════════════════════════════════════════════════
-// PART 2 CHAIN — CSS (plain text)
-// ═══════════════════════════════════════════════════
-
-function buildPart2Chain(
-  part1:         GeneratorPart1,
-  creativeScene: CreativeScene,
-  analysis:      AnalysisResult
-): ModelFn<string>[] {
-  const systemPrompt = buildPart2SystemPrompt(part1, creativeScene, analysis);
-
-  return [
-    {
-      name: 'Gemini Flash (CSS)',
-      fn: async () => {
-        const text = await callGeminiText(
-          MODELS.gemini.flash,
-          systemPrompt,
-          'Gemini Flash CSS',
-          3000
-        );
-        const css = extractCSS(text, 'Gemini Flash CSS');
-        validateCSS(css, 'Gemini Flash CSS');
-        return css;
-      },
-    },
-    {
-      name: 'Gemini Flash Lite (CSS)',
-      fn: async () => {
-        const text = await callGeminiText(
-          MODELS.gemini.flashLite,
-          systemPrompt,
-          'Gemini Flash Lite CSS',
-          3000
-        );
-        const css = extractCSS(text, 'Gemini Flash Lite CSS');
-        validateCSS(css, 'Gemini Flash Lite CSS');
-        return css;
-      },
-    },
-    {
-      name: 'Groq (CSS)',
-      fn: async () => {
-        const text = await callGroqText(
-          systemPrompt,
-          'Generate the CSS now. Return only raw CSS, no explanation.',
-          'Groq CSS',
-          3000
-        );
-        const css = extractCSS(text, 'Groq CSS');
-        validateCSS(css, 'Groq CSS');
-        return css;
-      },
-    },
-  ];
-}
-
-// ═══════════════════════════════════════════════════
-// PART 3 CHAIN — sceneScript (JSON)
-// ═══════════════════════════════════════════════════
-
-function buildPart3Chain(
-  part1:         GeneratorPart1,
-  creativeScene: CreativeScene,
-  analysis:      AnalysisResult,
-  compactPrompt: string
-): ModelFn<string>[] {
-  const prompt = buildPart3SystemPrompt(part1, creativeScene, analysis);
-
-  return [
-    // 1. Gemini Pro — best quality JS
-    {
-      name: 'Gemini Pro (Script)',
-      fn: async () => {
-        const text = await callGeminiText(
-          MODELS.gemini.pro,
-          prompt,
-          'Gemini Pro Script',
-          8000
-        );
-        const script = extractScript(text, 'Gemini Pro Script');
-        validateScript(script, 'Gemini Pro Script');
-        return script;
-      },
-    },
-
-    // 2. Gemini Flash — faster fallback
-    {
-      name: 'Gemini Flash (Script)',
-      fn: async () => {
-        const text = await callGeminiText(
-          MODELS.gemini.flash,
-          prompt,
-          'Gemini Flash Script',
-          8000
-        );
-        const script = extractScript(text, 'Gemini Flash Script');
-        validateScript(script, 'Gemini Flash Script');
-        return script;
-      },
-    },
-
-    // 3. Gemini Flash Lite — last resort
-    {
-      name: 'Gemini Flash Lite (Script)',
-      fn: async () => {
-        const text = await callGeminiText(
-          MODELS.gemini.flashLite,
-          prompt,
-          'Gemini Flash Lite Script',
-          8000
-        );
-        const script = extractScript(text, 'Gemini Flash Lite Script');
-        validateScript(script, 'Gemini Flash Lite Script');
-        return script;
-      },
-    },
-  ];
-}
-// ═══════════════════════════════════════════════════
-// COMBINER
-// ═══════════════════════════════════════════════════
-
-function combineOutputs(
-  part1:      GeneratorPart1,
-  customCSS:  string,
-  sceneScript: string
-): AIVisualizationOutput {
-  return {
-    templateType: part1.templateType as TemplateType,
-    customCSS,
-    sceneHTML:    '',
-    sceneScript,
-    sceneConfig:  part1.sceneConfig,
-  };
+  // Auto-start
+  caption.textContent = 'Click Play or Next to begin exploring ${analysis.algorithmName}.';
+  stepCounter.textContent = '0 / ' + STEPS.length;
+</script>
+</body>
+</html>`;
 }
 
 // ═══════════════════════════════════════════════════
 // MAIN EXPORT
 // ═══════════════════════════════════════════════════
 
-/**
- * generateVisualization()
- *
- * 3-call architecture:
- *   Call 1: Config (JSON)      → Gemini Flash → Flash Lite → Groq
- *   Call 2: CSS (plain text)   → Gemini Flash → Flash Lite → Groq
- *   Call 3: Script (JSON)      → Gemini Pro   → Flash → Groq
- *
- * Sequential calls — no parallel to avoid rate spikes.
- * No JSON escaping issues in CSS (plain text).
- * Gemini Pro focused only on JS — best quality script.
- */
 export async function generateVisualization(
-  compactPrompt:  string,
-  creativeScene:  CreativeScene,
-  technicalSpec:  TechnicalSpec,
-  analysis:       AnalysisResult
-): Promise<AIVisualizationOutput> {
+  promptArtifacts: PromptArtifacts,
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): Promise<GeneratorOutput> {
+  console.log("[Generator] Starting HTML generation...");
+  console.log("[Generator] Algorithm:", analysis.algorithmName);
+  console.log("[Generator] Scene:", creativeDirection.sceneName);
+  console.log("[Generator] Template:", promptArtifacts.templateType);
 
-  console.log('[Generator] Starting 3-call generation...');
-  console.log('[Generator] Algorithm:', analysis.algorithmName);
-  console.log('[Generator] Template:', technicalSpec.templateType);
-  console.log('[Generator] Scene:', creativeScene.sceneName);
+  // Decide which prompt to use
+  // fullPrompt is more detailed, compactPrompt is token-safe fallback
+  const prompt = promptArtifacts.fullPrompt;
 
-  // ── Call 1: Config ────────────────────────────────
-  console.log('[Generator] Call 1: Config...');
-  const part1Chain = buildPart1Chain(compactPrompt, analysis, technicalSpec);
-  const { result: part1, model: model1 } = await runModelChain(
-    part1Chain,
-    GEMINI_RETRY_CONFIG,
-    'Generator-Config'
-  );
-  console.log(`[Generator] ✅ Config via ${model1}`);
-  console.log(`[Generator] Template: ${part1.templateType}`);
+  try {
+    // ── Step 1: Generate HTML ──────────────────────
+    const { rawHTML, model } = await runGenerator(prompt);
 
-  // ── Call 2: CSS ───────────────────────────────────
-  console.log('[Generator] Call 2: CSS...');
-  const part2Chain = buildPart2Chain(part1, creativeScene, analysis);
-  const { result: customCSS, model: model2 } = await runModelChain(
-    part2Chain,
-    GEMINI_RETRY_CONFIG,
-    'Generator-CSS'
-  );
-  console.log(`[Generator] ✅ CSS via ${model2} — ${customCSS.length} chars`);
+    // ── Step 2: Validate ───────────────────────────
+    const validation = validateHTML(rawHTML);
 
-  
-   // ── Call 3: Script ────────────────────────────────
-  console.log('[Generator] Call 3: Script...');
-  const part3Chain = buildPart3Chain(part1, creativeScene, analysis, compactPrompt);
-  const { result: sceneScript, model: model3 } = await runModelChain(
-    part3Chain,
-    GEMINI_RETRY_CONFIG,
-    'Generator-Script'
-  );
-  console.log(`[Generator] ✅ Script via ${model3} — ${sceneScript.length} chars`);
+    console.log("[Generator] Validation:", {
+      valid: validation.valid,
+      complete: validation.complete,
+      truncated: validation.truncated,
+      issues: validation.issues,
+      length: rawHTML.length,
+    });
 
-  // ── Combine ───────────────────────────────────────
-  const output = combineOutputs(part1, customCSS, sceneScript);
+    // ── Step 3: Repair if truncated ────────────────
+    if (validation.truncated && validation.valid) {
+      console.log("[Generator] HTML truncated, attempting repair...");
 
-  console.log('[Generator] ✅ Generation complete');
-  console.log(`[Generator] Config via:  ${model1}`);
-  console.log(`[Generator] CSS via:     ${model2}`);
-  console.log(`[Generator] Script via:  ${model3}`);
+      const repaired = await repairHTML(rawHTML, analysis, creativeDirection);
 
-  return output;
-}
+      if (repaired) {
+        return {
+          html: repaired,
+          model,
+          repaired: true,
+          truncated: false,
+        };
+      }
 
-// ═══════════════════════════════════════════════════
-// LEGACY EXPORT
-// ═══════════════════════════════════════════════════
+      console.warn("[Generator] Repair failed, using truncated HTML with forced closing tags");
 
-/**
- * @deprecated Use generateVisualization() + assembleHTML()
- */
-export async function generateHTML(
-  compactPrompt:  string,
-  creativeScene:  CreativeScene,
-  technicalSpec:  TechnicalSpec,
-  analysis:       AnalysisResult
-): Promise<string> {
-  const { assembleHTML } = await import('@/lib/visualizer/assembler');
-  const aiOutput = await generateVisualization(
-    compactPrompt,
-    creativeScene,
-    technicalSpec,
-    analysis
-  );
-  return assembleHTML(aiOutput, analysis);
+      // Force close the HTML
+      let forceClosed = rawHTML;
+      const lower = forceClosed.toLowerCase();
+
+      if (!lower.includes("</script>") && lower.includes("<script")) {
+        // Try to close any open JS constructs
+        forceClosed += "\n})();\n</script>";
+      }
+      if (!lower.includes("</body>")) {
+        forceClosed += "\n</body>";
+      }
+      if (!lower.includes("</html>")) {
+        forceClosed += "\n</html>";
+      }
+
+      return {
+        html: forceClosed,
+        model,
+        repaired: false,
+        truncated: true,
+      };
+    }
+
+    // ── Step 4: Valid and complete ──────────────────
+    if (validation.valid && validation.complete) {
+      return {
+        html: rawHTML,
+        model,
+        repaired: false,
+        truncated: false,
+      };
+    }
+
+    // ── Step 5: Not valid — try compact prompt ─────
+    if (!validation.valid) {
+      console.warn("[Generator] Full prompt output invalid, trying compact prompt...");
+
+      try {
+        const { rawHTML: compactHTML, model: compactModel } =
+          await runGenerator(promptArtifacts.compactPrompt);
+
+        const compactValidation = validateHTML(compactHTML);
+
+        if (compactValidation.valid) {
+          return {
+            html: compactHTML,
+            model: compactModel,
+            repaired: false,
+            truncated: compactValidation.truncated,
+          };
+        }
+      } catch (compactError) {
+        console.warn(
+          "[Generator] Compact prompt also failed:",
+          compactError instanceof Error ? compactError.message : String(compactError)
+        );
+      }
+    }
+
+    // ── Step 6: Return whatever we got ─────────────
+    if (rawHTML.length > 200) {
+      return {
+        html: rawHTML,
+        model,
+        repaired: false,
+        truncated: validation.truncated,
+      };
+    }
+
+    // ── Step 7: Total failure — use fallback ───────
+    console.warn("[Generator] All attempts produced poor results, using fallback HTML");
+
+    return {
+      html: buildFallbackHTML(analysis, creativeDirection),
+      model: "fallback",
+      repaired: false,
+      truncated: false,
+    };
+  } catch (error) {
+    console.error(
+      "[Generator] Fatal error:",
+      error instanceof Error ? error.message : String(error)
+    );
+
+    // Return fallback instead of crashing
+    return {
+      html: buildFallbackHTML(analysis, creativeDirection),
+      model: "fallback",
+      repaired: false,
+      truncated: false,
+    };
+  }
 }

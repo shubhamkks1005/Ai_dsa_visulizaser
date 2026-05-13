@@ -1,757 +1,2425 @@
 // lib/ai/prompts.ts
 
-import { AnalysisResult } from "@/types";
-import { CreativeScene, TechnicalSpec } from "@/types";
+import type { AnalysisResult } from "@/types";
+import type { CreativeDirection } from "@/lib/ai/analyzer";
 
 // ═══════════════════════════════════════════════════
-// 1. CREATIVE PROMPT
-// Model: DeepSeek V3 (primary) → Qwen 80B (fallback)
-// Output: CreativeScene JSON
+// TYPES
 // ═══════════════════════════════════════════════════
 
-export function buildCreativePrompt(analysis: AnalysisResult): string {
-  const categoryHints = getCreativityHints(analysis.category);
+export type TemplateType =
+  | "array"
+  | "graph"
+  | "tree"
+  | "dp"
+  | "stackqueue"
+  | "recursion";
 
-  // Build variable list for context
-  const varList = Array.isArray(analysis.variables)
-    ? analysis.variables
-        .map((v: any) =>
-          typeof v === 'string' ? v : `${v.name} (${v.meaning})`
-        )
-        .join(', ')
-    : '';
-
-  return `You are a world-class creative visual director specializing in cinematic algorithm animations.
-
-Your job: Given an algorithm analysis, create a RICH and SPECIFIC visual scene specification.
-This will be used to generate a beautiful HTML/CSS/JS visualization.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ALGORITHM ANALYSIS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Name:                 ${analysis.algorithmName}
-Category:             ${analysis.category}
-Description:          ${analysis.description}
-Physical Metaphor:    ${analysis.physicalInterpretation}
-Key Insight:          ${analysis.keyInsight}
-Input Example:        ${analysis.inputExample}
-Variables:            ${varList}
-Steps Count:          ${analysis.steps?.length ?? 0}
-Time Complexity:      ${analysis.timeComplexity}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${categoryHints}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-MANDATORY CREATIVITY RULES:
-1. METAPHOR: You MUST infer a vivid real-world metaphor from the algorithm behavior.
-   Do NOT use generic terms like "elements" or "process".
-   Use specific physical scenarios.
-
-2. HERO CHARACTER: You MUST define a specific hero character — NOT just a pointer/arrow.
-   Examples: a frog, an explorer, a chef, a GPS navigator, a bubble, a detective.
-   The character must have personality and a specific look.
-
-3. ENVIRONMENT: You MUST define a rich environment — NOT just a background color.
-   Examples: moonlit swamp with lily pads, rainy city skyline, ancient cave system.
-   Include multiple background layers and ambient effects.
-
-4. OBJECT MAPPING: You MUST map EVERY code element to a specific visual object.
-   Example:
-     heights[] = stone platforms of varying heights
-     left pointer = glowing green beacon
-     right pointer = glowing red beacon
-     water = blue translucent liquid fill
-
-5. STEP MAPPING: You MUST describe what happens VISUALLY for each action type.
-   Be specific about animations, not vague.
-
-6. NON-NEGOTIABLE: List requirements that MUST appear in the final visualization.
-   These override everything else.
-   Be very specific: "Show an actual frog sprite jumping with arc trajectory"
-   NOT: "show movement"
-
-THINK ABOUT:
-- What would Pixar show in 5 seconds to explain this algorithm?
-- Can a viewer GUESS the algorithm just by watching?
-- What makes this visualization DIFFERENT from generic bars?
-- What emotions should the viewer feel? (excitement, tension, satisfaction)
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Return ONLY valid JSON. No explanation before or after.
-
-{
-  "metaphor": "One vivid sentence: [Character] is [doing what] to [achieve what goal]",
-  "sceneName": "Short evocative scene name (3-5 words)",
-  "heroCharacter": {
-    "type": "frog / explorer / detective / sorter / navigator / bubble / chef / etc",
-    "look": "Specific emoji or visual description (e.g. 🐸 green frog with big eyes)",
-    "idleAnimation": "What character does when waiting (e.g. breathing gently, eyes blinking)",
-    "moveAnimation": "How character moves between positions (e.g. arcing jump with trail)"
-  },
-  "environment": {
-    "setting": "Full rich scene description (2-3 sentences)",
-    "backgroundLayers": [
-      "layer1 description (furthest back)",
-      "layer2 description (middle)",
-      "layer3 description (closest)"
-    ],
-    "ambientEffects": [
-      "effect1 (e.g. fireflies floating, rain drops, dust motes)",
-      "effect2"
-    ]
-  },
-  "objectMapping": {
-    "codeElementName": "visual representation description",
-    "anotherElement": "visual representation description"
-  },
-  "colorPalette": {
-    "primary": "#hexcolor",
-    "secondary": "#hexcolor",
-    "accent": "#hexcolor",
-    "danger": "#hexcolor",
-    "background": "#hexcolor"
-  },
-  "stepToSceneMapping": [
-    {
-      "stepType": "initialize / compare / swap / update / found / complete / etc",
-      "visual": "Specific description of what appears visually",
-      "animation": "Which animation style (arc jump / water fill / shake / glow / etc)"
-    }
-  ],
-  "dramaticMoments": [
-    "Description of first key dramatic moment",
-    "Description of halfway milestone",
-    "Description of the biggest single operation",
-    "Description of the final completion moment"
-  ],
-  "nonNegotiableVisualRequirements": [
-    "Very specific requirement 1 (what MUST be visible)",
-    "Very specific requirement 2",
-    "Very specific requirement 3",
-    "Very specific requirement 4"
-  ]
-}`;
+export interface PromptArtifacts {
+  templateType: TemplateType;
+  fullPrompt: string;
+  compactPrompt: string;
 }
 
 // ═══════════════════════════════════════════════════
-// 2. TECHNICAL PROMPT
-// Model: Qwen 80B (primary) → DeepSeek V3 (fallback)
-// Output: TechnicalSpec JSON
+// PUBLIC API
 // ═══════════════════════════════════════════════════
 
-export function buildTechnicalPrompt(analysis: AnalysisResult): string {
+export function generatePromptArtifacts(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): PromptArtifacts {
+  const templateType = inferTemplateType(analysis);
+  const fullPrompt = buildFullPersonalizedPrompt(
+    analysis,
+    creativeDirection,
+    templateType
+  );
+  const compactPrompt = buildCompactPrompt(
+    analysis,
+    creativeDirection,
+    templateType
+  );
 
-  // Build steps summary for context
-  const stepsSummary = (analysis.steps || [])
-    .slice(0, 10) // first 10 for context
-    .map(s => `  ${s.step}. [${s.action}] ${s.caption}`)
-    .join('\n');
-
-  // Build variable list
-  const varList = Array.isArray(analysis.variables)
-    ? analysis.variables
-        .map((v: any) =>
-          typeof v === 'string' ? v : v.name
-        )
-        .slice(0, 8)
-        .join(', ')
-    : '';
-
-  return `You are a senior technical architect for algorithm visualizations.
-
-Your job: Given an algorithm analysis, define the TECHNICAL SPECIFICATION
-for a prebuilt visualization system.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ALGORITHM ANALYSIS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Name:            ${analysis.algorithmName}
-Category:        ${analysis.category}
-Variables:       ${varList}
-Data Structures: ${(analysis.dataStructures || []).join(', ')}
-Steps Count:     ${analysis.steps?.length ?? 0}
-Time Complexity: ${analysis.timeComplexity}
-
-First 10 Steps:
-${stepsSummary}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PREBUILT SYSTEM CONTRACT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The following are ALREADY BUILT and available.
-Do NOT describe regenerating them. Only reference by name.
-
-FIXED UI (always present):
-  - Top stats bar with animated counters
-  - Bottom caption bar with word-by-word reveal
-  - Controls: Reset, Prev, Play/Pause, Next, Speed (0.5x→3x)
-  - Progress bar (top of controls)
-  - Right sidebar panel (variables auto-updated)
-  - Layout grid: stats / scene / caption / controls / sidebar
-
-FIXED JS ENGINE (always present):
-  - renderStep(index) — calls renderScene(step, index)
-  - PlaybackEngine — play/pause/next/prev/reset/speed
-  - CaptionEngine  — setCaption(), showImportantCaption()
-  - StatsEngine    — updateStat(), updateVariables()
-  - initVisualization(config) — master init function
-
-AVAILABLE ANIMATION UTILITIES (call by name):
-  Movement:   moveTo, moveArc, moveArcHigh, springTo, slideIn, slideOut
-  Visibility: fadeIn, fadeOut, fadeInUp, fadeOutUp, fadeInScale, blink
-  Glow:       highlight, glowPulse, glowFlash, spotlight, colorShift, neonFlicker
-  Scale:      popIn, popOut, breathe, squashAndStretch, scaleUp, scaleDown
-  Rotation:   shake, wobble, jello, spin, swing
-  Text:       typeWords, countUp, valueChange, dramaticText, scrambleText
-  Particles:  splashBurst, confettiBurst, ripple, shockwave, sparkle, bubbles
-  Water:      waterFill, waterRipple, waterSplash, waterDrop
-  Drawing:    drawLine, drawArc, drawArrow, connectionBeam, pathHighlight
-  Camera:     zoomIn, zoomOut, panTo, cameraShake, focusOn
-  State:      markSorted, markActive, markVisited, markCurrent, markError
-  Character:  characterIdle, characterJump, characterCelebrate, characterWalk
-  Completion: celebrationWave, victoryBurst, goldOutline, finalReveal
-  Timing:     delay, stagger, sequence, chainAnimations
-
-AVAILABLE TEMPLATES (pick ONE):
-  array      — horizontal bars/cards with value+index labels, pointer slots below
-  graph      — circular node layout with SVG edges, distance labels, queue panel
-  tree       — hierarchical node layout, SVG edges, traversal result bar
-  dp         — 1D or 2D table with formula/computation/result bars
-  stackqueue — vertical stack or horizontal queue with operation log
-  recursion  — call stack panel + center scene + return values panel
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-YOUR TASK
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Based on the algorithm, specify:
-1. Which template to use (and why briefly)
-2. What stats to show in the stats bar (3-5 stats)
-3. Which animation utilities to trigger for each action type
-4. Any layout-specific rules
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-OUTPUT FORMAT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Return ONLY valid JSON. No explanation before or after.
-
-{
-  "templateType": "array / graph / tree / dp / stackqueue / recursion",
-  "templateReason": "One sentence why this template fits",
-  "layoutRules": {
-    "mainScene": "Description of main scene layout and spacing",
-    "statsBar": [
-      { "key": "comparisons", "label": "Comparisons", "side": "left"  },
-      { "key": "swaps",       "label": "Swaps",       "side": "left"  },
-      { "key": "currentStep", "label": "Step",        "side": "right" }
-    ],
-    "sidePanel": "Description of what variables/info goes in sidebar"
-  },
-  "animationMapping": {
-    "initialize": "stagger + fadeInScale",
-    "compare":    "highlight + glowPulse",
-    "swap":       "moveArc + splashBurst + cameraShake",
-    "update":     "valueChange + glowFlash",
-    "found":      "dramaticText + confettiBurst + goldOutline",
-    "complete":   "celebrationWave + victoryBurst + finalReveal"
-  },
-  "baseInterval": 1200
-}`;
+  return {
+    templateType,
+    fullPrompt,
+    compactPrompt,
+  };
 }
 
-// ═══════════════════════════════════════════════════
-// 3. COMBINE FULL PROMPT (debug / inspection)
-// Human-readable. NOT sent to generator.
-// ═══════════════════════════════════════════════════
+function inferPhaseName(analysis: AnalysisResult): string {
+  const name = safe(analysis.algorithmName).toLowerCase();
+  const category = safe(analysis.category).toLowerCase();
 
-export function combineFullPrompt(
-  analysis:  AnalysisResult,
-  creative:  CreativeScene,
-  technical: TechnicalSpec
+  if (name.includes("bubble sort")) return "Comparison Pass";
+  if (name.includes("merge sort")) return "Split & Merge";
+  if (name.includes("quick sort")) return "Partition";
+  if (name.includes("binary search")) return "Range Search";
+  if (name.includes("frog")) return "Jump Planning";
+  if (name.includes("rain water")) return "Boundary Scan";
+  if (name.includes("dijkstra")) return "Path Relaxation";
+  if (name.includes("bfs")) return "Level Expansion";
+  if (name.includes("dfs")) return "Deep Traversal";
+
+  if (category.includes("sorting")) return "Sorting Pass";
+  if (category.includes("graph")) return "Graph Traversal";
+  if (category.includes("dp")) return "State Building";
+  if (category.includes("tree")) return "Tree Traversal";
+  if (category.includes("binary search")) return "Range Reduction";
+  if (category.includes("two pointer")) return "Pointer Scan";
+  if (category.includes("recursion")) return "Recursive Call";
+  if (category.includes("backtracking")) return "Path Exploration";
+  if (category.includes("greedy")) return "Greedy Selection";
+  if (category.includes("stack")) return "Stack Operation";
+  if (category.includes("queue")) return "Queue Operation";
+
+  return "Processing";
+}
+
+export function buildFullPersonalizedPrompt(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection,
+  templateType: TemplateType = inferTemplateType(analysis)
 ): string {
-  // Build variable list
-  const varList = Array.isArray(analysis.variables)
-    ? analysis.variables
-        .map((v: any) =>
-          typeof v === 'string' ? v : `${v.name}: ${v.meaning}`
-        )
-        .join('\n  ')
-    : '';
+  const steps = getSteps(analysis);
+  const variables = getVariables(analysis);
+  const dataStructures = getDataStructures(analysis);
+  const inputSize = estimateInputSize(analysis.inputExample, steps.length);
+  const detailLevel = inferDetailLevel(inputSize);
+  const stats = inferStats(analysis);
+  const objectMapping = normalizeObjectMapping(creativeDirection.objectMapping);
+  const colorMeanings = buildSemanticColorMap(creativeDirection);
+  const categoryRules = getCategorySpecificRules(analysis);
+  const personality = inferAlgorithmPersonality(analysis);
+  const domain = inferDomain(analysis, creativeDirection);
+  const sceneMaterials = inferMaterialSystem(analysis, creativeDirection);
+  const voiceLines = buildAlgorithmDialogue(analysis, creativeDirection);
+  const stepActionSet = Array.from(new Set(steps.map((step) => step.action)));
+  const currentPhaseName = inferPhaseName(analysis);
 
   return `
-╔══════════════════════════════════════════════════════════════╗
-║         ALGORITHM VISUALIZATION — FULL PERSONALIZED PROMPT  ║
-╚══════════════════════════════════════════════════════════════╝
+You are an Algorithm Visualization Generator AI.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ALGORITHM
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Name:       ${analysis.algorithmName}
-Category:   ${analysis.category}
-Language:   ${analysis.language}
-Time:       ${analysis.timeComplexity}
-Space:      ${analysis.spaceComplexity}
+When given this analyzed algorithm specification, generate a SINGLE self-contained HTML file.
 
-Description:
-  ${analysis.description}
+═══════════════════════════════════════════════════════════
+PRIMARY OBJECTIVE
+═══════════════════════════════════════════════════════════
+Generate a cinematic, educational, non-generic algorithm visualization that:
+- works directly in a browser
+- works inside iframe srcdoc
+- uses Vanilla HTML/CSS/JS only
+- uses DOM-based visual elements (not canvas-only)
+- precomputes all replay steps as a JavaScript array
+- includes controls: Reset | Prev | Play/Pause | Next | Speed
+- includes a clear top stats area, bottom caption area, and right info panel
+- never renders as a blank screen
+- feels specific to THIS algorithm, not a generic template demo
 
-Key Insight:
-  ${analysis.keyInsight}
+═══════════════════════════════════════════════════════════
+OUTPUT RULES
+═══════════════════════════════════════════════════════════
+- Output ONLY a single complete HTML file
+- Include all CSS inside <style> tags
+- Include all JS inside <script> tags
+- HTML must end with </html>
+- No markdown fences
+- No explanations before or after the HTML
+- No React, Vue, TypeScript, build tools, or external local files
+- Optional CDN usage is allowed only if absolutely necessary, but prefer self-contained vanilla implementation
 
-Input:  ${analysis.inputExample}
-Output: ${analysis.expectedOutput}
+═══════════════════════════════════════════════════════════
+THE 48-SECTION PERSONALIZED SPEC
+═══════════════════════════════════════════════════════════
 
-Variables:
-  ${varList}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHASE 1 — IDENTITY & ANALYSIS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Data Structures: ${(analysis.dataStructures || []).join(', ')}
+SECTION 1 — Algorithm / Problem Identity
+────────────────────────────────────────
+- ALGORITHM/PROBLEM NAME: ${safe(analysis.algorithmName)}
+- CATEGORY: ${safe(analysis.category)}
+- FAMOUS PROBLEM: ${inferFamousProblem(analysis)}
+- LANGUAGE DETECTED: ${safe(analysis.language)}
+- FUNCTION NAME(S): ${inferFunctionNames(analysis)}
+- TIME COMPLEXITY: ${safe(analysis.timeComplexity)}
+- SPACE COMPLEXITY: ${safe(analysis.spaceComplexity)}
+- CORE GOAL (plain language): ${safe(analysis.description)}
+- PHYSICAL / REAL-WORLD INTERPRETATION: ${safe(analysis.physicalInterpretation)}
+- INPUT (example from code): ${safe(analysis.inputExample)}
+- EXPECTED OUTPUT: ${safe(analysis.expectedOutput)}
+- KEY INSIGHT: ${safe(analysis.keyInsight)}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-VISUAL METAPHOR (Creative Chunk)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Metaphor:   ${creative.metaphor}
-Scene:      ${creative.sceneName}
+SECTION 2 — Problem Semantics & Real-World Interpretation
+─────────────────────────────────────────────────────────
+- What do input elements represent?
+  ${buildInputMeaning(analysis, creativeDirection)}
+- What do indices/positions represent?
+  ${buildIndexMeaning(analysis, creativeDirection)}
+- What do pointers/variables represent in the scene?
+  ${buildPointerMeaning(analysis, creativeDirection)}
+- What is the PROCESS physically?
+  ${buildPhysicalProcessMeaning(analysis, creativeDirection)}
+- What is the RESULT physically?
+  ${buildResultMeaning(analysis, creativeDirection)}
+- What do auxiliary data structures represent?
+  ${buildAuxiliaryMeaning(analysis, creativeDirection)}
 
-Hero Character:
-  Type:  ${creative.heroCharacter.type}
-  Look:  ${creative.heroCharacter.look}
-  Idle:  ${creative.heroCharacter.idleAnimation}
-  Move:  ${creative.heroCharacter.moveAnimation}
+SECTION 3 — Data Structures to Visualize (Semantic Mapping)
+───────────────────────────────────────────────────────────
+PRIMARY STRUCTURE:
+- Name: ${inferPrimaryStructure(analysis)}
+- Visual form: ${inferPrimaryVisualForm(analysis, creativeDirection)}
+- How values map to visuals: ${inferValueToVisualMapping(analysis, creativeDirection)}
 
-Environment:
-  Setting: ${creative.environment.setting}
-  Layers:  ${creative.environment.backgroundLayers.join(' → ')}
-  Ambient: ${creative.environment.ambientEffects.join(', ')}
+SECONDARY STRUCTURES (list ALL):
+${buildSecondaryStructures(analysis, creativeDirection)}
 
-Object Mapping:
-${Object.entries(creative.objectMapping)
-  .map(([k, v]) => `  ${k} → ${v}`)
-  .join('\n')}
+TRACK THESE AT EVERY STEP:
+${buildTrackedVariablesList(analysis)}
 
-Color Palette:
-  Primary:    ${creative.colorPalette.primary}
-  Secondary:  ${creative.colorPalette.secondary}
-  Accent:     ${creative.colorPalette.accent}
-  Danger:     ${creative.colorPalette.danger}
-  Background: ${creative.colorPalette.background}
+SECTION 4 — Step-by-Step Execution Trace (Story + Why)
+─────────────────────────────────────────────────────
+${buildDetailedStepTrace(analysis, creativeDirection)}
 
-Step-to-Scene Mapping:
-${creative.stepToSceneMapping
-  .map(s => `  [${s.stepType}] → ${s.visual} via ${s.animation}`)
-  .join('\n')}
+SECTION 5 — Edge Cases to Handle
+────────────────────────────────
+${buildEdgeCaseSection(analysis, creativeDirection)}
 
-Dramatic Moments:
-${creative.dramaticMoments.map(d => `  ★ ${d}`).join('\n')}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHASE 2 — LAYOUT & STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-NON-NEGOTIABLE VISUAL REQUIREMENTS:
-${creative.nonNegotiableVisualRequirements.map(r => `  ✅ ${r}`).join('\n')}
+SECTION 6 — Visual Design Specs (Base Style Tokens)
+──────────────────────────────────────────────────
+LAYOUT: ${inferLayoutDescription(templateType, analysis)}
+ELEMENT SHAPE: ${inferElementShape(analysis, creativeDirection)}
+ELEMENT SIZE: ${inferElementSizeRule(templateType, inputSize)}
+FONT: ${inferTypography(analysis, creativeDirection)}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-TECHNICAL SPEC (Technical Chunk)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Template:  ${technical.templateType}
-Reason:    ${(technical as any).templateReason || ''}
-Interval:  ${technical.baseInterval ?? 1200}ms
+COLOR PALETTE:
+${buildColorPaletteLines(creativeDirection)}
 
-Layout:
-  Main:  ${technical.layoutRules.mainScene}
-  Stats: ${JSON.stringify(technical.layoutRules.statsBar)}
-  Side:  ${technical.layoutRules.sidePanel}
+TIMING TIERS:
+- Fast: 120-150ms → highlight change, small glow shift, pointer focus
+- Medium: 300-400ms → pointer movement, counter update, range shift
+- Slow: 500-700ms → swap, merge, partition, jump, route traversal
+- Epic: 1000-1200ms → first reveal, major insight, final completion moment
 
-Animation Mapping:
-${Object.entries(technical.animationMapping)
-  .map(([k, v]) => `  ${k} → ${v}`)
-  .join('\n')}
+UI LAYOUT:
+- Top-left: ${safe(analysis.algorithmName)} + live phase label (${currentPhaseName})
+- Top-center/right: ${stats.map((s) => s.label).join(", ")}
+- Center: main ${templateType} scene with cinematic depth
+- Bottom: word-by-word explanatory caption
+- Right sidebar: legend + variables + state summary + optional history
+- Bottom bar: Reset / Prev / Play-Pause / Next / Speed
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP TRACE (${analysis.steps.length} steps)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${analysis.steps
-  .map(s =>
-    `Step ${s.step}${s.important ? ' ⭐' : ''}:\n` +
-    `  Action:    ${s.action}\n` +
-    `  Caption:   ${s.caption}\n` +
-    `  Variables: ${JSON.stringify(s.variables)}`
+SECTION 7 — Object Mapping & Scene Vocabulary
+────────────────────────────────────────────
+SCENE NAME: ${safe(creativeDirection.sceneName)}
+
+For EACH abstract element, choose a CONCRETE visual:
+${formatObjectMapping(objectMapping)}
+
+SCENE ASSETS:
+${buildSceneAssets(analysis, creativeDirection)}
+
+NO-GENERIC RULE:
+The main visualization must visually read as:
+"${safe(creativeDirection.metaphor)}"
+Do NOT collapse this into plain colored boxes unless absolutely impossible.
+
+SECTION 8 — Layout Engine & Positioning Math
+───────────────────────────────────────────
+COORDINATE SYSTEM: ${inferCoordinateSystem(templateType)}
+
+SPACING FORMULAS:
+${buildSpacingFormulas(templateType, inputSize)}
+
+VIEWPORT RULES:
+- If elements do not fit: ${inferViewportBehavior(templateType, inputSize)}
+- Camera bounds: min zoom 0.82, max zoom 1.18
+- Auto-focus: center active region on meaningful operations, not on every trivial micro-step
+
+COLLISION AVOIDANCE:
+- Labels must avoid overlapping values or hero character
+- Pointers must offset vertically when multiple are active
+- Edge labels must not sit directly on top of nodes
+- Sidebar width must stay stable even during value changes
+
+PANEL SIZING:
+- Right sidebar: 270px to 300px
+- Bottom caption: minimum 84px height
+- Stats bar: responsive grid of compact stat cards
+
+SECTION 9 — Input Size Adaptation Rules
+──────────────────────────────────────
+n < 15:
+- Full cinematic detail
+- All labels visible
+- All ambient effects enabled
+
+15 < n < 50:
+- Slightly smaller elements
+- Reduce decorative particle frequency
+- Keep educational captions but shorten repeated notes
+
+50 < n < 100:
+- Thin elements / smaller labels
+- Faster default timings
+- Skip low-value repetitive annotations
+
+n > 100:
+- Simplified rendering
+- Windowing / scroll / aggregation if needed
+- Only major operations emphasized
+
+CURRENT INPUT SIZE: n ≈ ${inputSize}
+DETAIL LEVEL FOR THIS INPUT: ${detailLevel}
+
+SECTION 10 — State Initialization & Setup Logic
+──────────────────────────────────────────────
+BUILD SEQUENCE:
+1. Background + atmosphere appears for "${safe(creativeDirection.sceneName)}"
+2. Main structure enters using ${inferIntroEntryMotion(analysis, creativeDirection)}
+3. Labels and indices fade in
+4. Hero character appears: ${safe(creativeDirection.heroCharacter.look)}
+5. Secondary markers / pointers / helper guides initialize
+6. Sidebar and stats start at zero / base values
+7. First caption introduces the problem in plain language
+8. Controls become enabled after the intro build
+
+INITIAL VALUES:
+${buildInitialValues(analysis)}
+
+ANIMATION FOR INITIAL BUILD:
+- Elements enter: ${inferIntroEntryMotion(analysis, creativeDirection)}
+- Stagger: 55-80ms between primary elements
+- Total intro build time: 900-1400ms
+
+PRE-COMPUTATION SANITY CHECK:
+- If steps > 2000: simplify repetitive visuals
+- If steps > 5000: show large-input simplified mode message
+- For this algorithm: total steps = ${steps.length}
+
+SECTION 11 — Semantic Color System
+─────────────────────────────────
+${colorMeanings}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHASE 3 — ANIMATION CORE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 12 — Animation Physics & Easing
+──────────────────────────────────────
+- ENTER: scale(0.85) + fade in + slight rise
+- EXIT: fade out + scale down + soften glow
+- MOVEMENT EASING: cubic-bezier(0.34, 1.56, 0.64, 1)
+- SWAP / CROSSING MOTION: ${inferSwapAnimation(analysis, creativeDirection)}
+- POINTER MOVEMENT: smooth physical travel, never teleport
+- STAGGER RULE: 70-90ms domino delay when many elements update
+- TIMING HIERARCHY must respect each step's timingMult field
+
+SECTION 13 — Creation & Destruction Animations
+─────────────────────────────────────────────
+CREATION RULES:
+- Main objects appear as ${inferCreationSequence(analysis, creativeDirection)}
+- Hero appears with a brief character reveal and idle settle
+- Auxiliary panels slide in with low drama so main scene stays primary
+
+DESTRUCTION RULES:
+- Removed / rejected / eliminated objects use ${inferDestructionSequence(analysis, creativeDirection)}
+- Deleted links retract physically
+- Merged objects must visually combine rather than instantly replacing one another
+
+SECTION 14 — Value Change Animations
+───────────────────────────────────
+- Numeric changes should animate old → new visibly
+- Live counters in the stats bar should count upward, not snap
+- Updated values in the scene should briefly glow, then settle
+- If value changes correspond to ${domain}, reinforce that change with domain-specific motion
+
+SECTION 15 — Pointer & Reference Rules
+─────────────────────────────────────
+${buildPointerRules(analysis, creativeDirection)}
+
+SECTION 16 — Split / Merge / Partition Special Animations
+────────────────────────────────────────────────────────
+${buildSplitMergeRules(analysis, creativeDirection)}
+
+SECTION 17 — 3D Moments / Depth Illusion
+───────────────────────────────────────
+- Active elements: scale(1.04-1.1), stronger shadow, slight foreground lift
+- Inactive elements: mild opacity reduction and subtle blur where appropriate
+- Hero character should sit above base elements in z-index
+- Finalized / stable regions should feel calmer and more grounded than active zones
+- If recursion depth or hierarchy exists, smaller deeper layers should feel physically further away
+
+SECTION 18 — Physical Properties of Elements
+───────────────────────────────────────────
+- Weight system: larger / more significant values should feel heavier during movement
+- Gravity: drops accelerate in, lifts ease out
+- Elastic settle: overshoot then relax
+- Resistance: hesitation can be shown before a difficult move
+- Active scale: 1.06
+- Settled scale: 0.98
+- Special element scale: 1.12 with accent glow
+- Motion should feel ${personality.motionStyle}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHASE 4 — CINEMATIC & FEEL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 19 — Conditional Creative Rules (Generic Fallback Engine)
+──────────────────────────────────────────────────────────────
+${categoryRules}
+
+SECTION 20 — Algorithm Personality / Theme Mapping
+────────────────────────────────────────────────
+- ALGORITHM PERSONALITY: ${personality.name}
+- BEHAVIOR FEEL: ${personality.behavior}
+- BACKGROUND STYLE: ${personality.background}
+- TYPOGRAPHY FEEL: ${personality.typography}
+- ANIMATION FEEL: ${personality.motionStyle}
+- VIEWER EMOTION TARGET: ${personality.emotion}
+
+SECTION 21 — Metaphor System (Mandatory)
+──────────────────────────────────────
+1. METAPHOR SENTENCE:
+${safe(creativeDirection.metaphor)}
+
+2. OBJECT MAPPING:
+${formatObjectMapping(objectMapping)}
+
+3. OPERATION MAPPING:
+${buildOperationMapping(analysis, creativeDirection)}
+
+RULE:
+The metaphor must explain WHY the algorithm behaves this way, not just decorate it.
+
+SECTION 22 — Creative Intelligence / Non-Generic Rule
+───────────────────────────────────────────────────
+QUALITY GATE:
+- The output is INVALID if it looks like a reusable textbook demo with only colored rectangles
+- The output is VALID only if:
+  ✅ scene name is visible through environment + objects
+  ✅ hero character is visibly present
+  ✅ at least one domain-specific animation exists
+  ✅ a beginner could roughly guess what is happening from visuals + captions
+  ✅ "${safe(creativeDirection.sceneName)}" feels specific to ${safe(analysis.algorithmName)}
+
+MANDATORY NON-NEGOTIABLE REQUIREMENTS:
+${creativeDirection.nonNegotiableVisualRequirements
+  .map((item, index) => `${index + 1}. ${item}`)
+  .join("\n")}
+
+SECTION 23 — Tension & Suspense Mechanics
+────────────────────────────────────────
+- Before key comparisons / decisions, apply a short focus pause
+- Use spotlight / accent emphasis on meaningful state changes
+- Key decision beam should indicate success/failure when applicable
+- CLIMAX MOMENTS:
+${creativeDirection.dramaticMoments
+  .map((item, index) => `  ${index + 1}. ${item}`)
+  .join("\n")}
+- Use dramatic pacing on first major insight, midpoint, and completion
+- Do not overuse freeze frames
+
+SECTION 24 — High-Speed Visual Effects
+─────────────────────────────────────
+- Speed lines only for large-distance motion
+- Impact flash only for high-value events
+- Motion blur only for fast pointer / hero travel
+- Stress lines only for heavy / difficult movement
+- Exclamation effects:
+  ! = major update / swap
+  ? = uncertain search
+  ✓ = confirmed result
+- Shockwave reserved for biggest operation and final reveal
+
+SECTION 25 — Background, Glow, Particles, Trail & Depth
+──────────────────────────────────────────────────────
+BACKGROUND:
+${buildBackgroundGuidance(analysis, creativeDirection)}
+
+GLOW EFFECTS:
+- Active state uses ${safe(creativeDirection.colorPalette.accent)} glow
+- Important state uses brighter rim lighting
+- Final state uses calmer completion pulse
+
+PARTICLE EFFECTS:
+${buildParticleGuidance(analysis, creativeDirection)}
+
+TRAIL EFFECTS:
+- Hero movement leaves a subtle trail matching ${safe(
+    creativeDirection.colorPalette.accent
+  )}
+- Previous pointer positions fade out gently
+
+DEPTH / LAYERS:
+- Background, midground, foreground must remain visually distinct
+
+SECTION 26 — Visual Sound Equivalents
+───────────────────────────────────
+- Use micro-vibration on active comparisons
+- Use ripple at points of important interaction
+- Use subtle equalizer / activity bars only if they match the scene tone
+- Intensity should reflect algorithm activity, not random noise
+- Calm sections should visibly relax
+
+SECTION 27 — Algorithm Emotion & Personality Dialogue
+──────────────────────────────────────────────────
+ELEMENT EXPRESSIONS:
+- Comfortable: calm glow
+- Active: brighter focus + mild tension
+- Final position: satisfied settle
+- Special state: elevated confidence
+
+PROGRESS EMOTION:
+- 0-30%: learning / setup
+- 30-70%: strategy becomes visible
+- 70-90%: urgency and confidence increase
+- 90-100%: final resolution
+
+PERSONALITY DIALOGUE (brief optional chat bubbles or dramatic lines):
+${voiceLines.map((line) => `- ${line}`).join("\n")}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHASE 5 — UI, INFO & COMPLETION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 28 — Caption Box, Stats Bar & Algorithm Header
+───────────────────────────────────────────────────
+ALGORITHM HEADER:
+- Show "${safe(analysis.algorithmName)}"
+- Show current phase / operation band
+- Use subtle glow consistent with scene colors
+
+STATS BAR:
+${stats
+  .map(
+    (stat) =>
+      `- ${stat.label}: live-updated metric using key "${stat.key}" with animated counting`
   )
-  .join('\n\n')}
+  .join("\n")}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-EDGE CASES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${(analysis.edgeCases || []).map(e => `  • ${e}`).join('\n')}
+CAPTION BOX:
+- Every step must show an educational caption
+- Reveal words progressively
+- Important keywords can be bolded in accent color
+- Use captions already derived from the analysis step trace
+
+SECTION 29 — Annotation / Explain Mode System
+────────────────────────────────────────────
+- Provide explain mode toggle
+- Use short speech-bubble annotations near active elements
+- Good style: conversational, plain English, specific to THIS algorithm
+- Early steps = fuller explanation
+- Middle = shorter hints
+- Late = concise reinforcement
+- Max 2 annotations per step
+
+SECTION 30 — Function Call / Recursion Panel
+──────────────────────────────────────────
+${buildRecursionPanelRules(analysis)}
+
+SECTION 31 — Heatmap, Ghost Trail, Footprints & History
+────────────────────────────────────────────────────
+- Heatmap toggle: optional but useful
+- Ghost trail: show last 2-3 meaningful pointer or hero positions
+- Footprints / touch markers: brief and subtle
+- Comparison / action history panel:
+  show recent operations from this action set:
+  ${stepActionSet.join(", ")}
+
+SECTION 32 — Phase Transitions, Intro, Mid-Insight & Failure
+──────────────────────────────────────────────────────────
+INTRO:
+- Start with scene reveal + algorithm title + input overview
+
+PHASE CHANGE:
+- If algorithm naturally has phases, show a clean transition title:
+  ${inferNaturalPhaseTransitions(analysis)}
+
+MID-ALGORITHM INSIGHT:
+- Pause briefly around halfway and reinforce the key idea:
+  "${safe(analysis.keyInsight)}"
+
+COMPLETION TRANSITION:
+- Zoom out slightly
+- Calm the environment
+- Present final result clearly
+
+FAILURE CASE:
+- If no result / not found / impossible state applies, show clear visual failure without crashing
+
+SECTION 33 — Completion Sequence & Final Stats
+────────────────────────────────────────────
+COMPLETION SEQUENCE:
+1. Final state settles into resolved arrangement
+2. Completion wave passes across result region
+3. Stats card appears with:
+   - Total Steps: ${steps.length}
+   - Time Complexity: ${safe(analysis.timeComplexity)}
+   - Space Complexity: ${safe(analysis.spaceComplexity)}
+   - Output: ${safe(analysis.expectedOutput)}
+4. Main result gets one celebratory emphasis
+5. Keep final screen stable enough for user inspection
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHASE 6 — REALISM & POLISH
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 34 — Domain-Specific Physics Layer
+────────────────────────────────────────
+DOMAIN DETECTED: ${domain}
+
+Apply these physical rules:
+${buildDomainPhysics(analysis, creativeDirection)}
+
+SECTION 35 — Ambient Environment System
+──────────────────────────────────────
+- Base environment:
+  ${safe(creativeDirection.environment.setting)}
+- Ambient layers:
+${creativeDirection.environment.backgroundLayers
+  .map((layer) => `  - ${layer}`)
+  .join("\n")}
+- Ambient effects:
+${creativeDirection.environment.ambientEffects
+  .map((effect) => `  - ${effect}`)
+  .join("\n")}
+- During intense steps, environment should briefly intensify
+- During calm steps, environment should relax
+- At completion, environment should resolve peacefully
+
+SECTION 36 — Element Texture & Material System
+────────────────────────────────────────────
+MATERIAL SYSTEM:
+${sceneMaterials}
+
+RULE:
+Elements should not feel like flat anonymous divs. Material must match the metaphor.
+
+SECTION 37 — Cinematic Lighting System
+───────────────────────────────────
+- Spotlight follows active region, not the whole screen
+- Rim light for active elements in ${safe(creativeDirection.colorPalette.accent)}
+- Soft grounded shadows for main objects
+- Completion lighting warms / brightens slightly
+- Use light to guide attention, not to overwhelm readability
+
+SECTION 38 — Micro Interaction & Idle Animations
+──────────────────────────────────────────────
+- Hero idle: ${safe(creativeDirection.heroCharacter.idleAnimation)}
+- Active idle: subtle breathing and gentle pulse
+- Pointers: tiny bob or glow shift
+- Background effects: slow continuous life
+- Completed scene: almost still, but not dead
+
+SECTION 39 — Dramatic Moment Text System
+──────────────────────────────────────
+At most 4 dramatic texts:
+${creativeDirection.dramaticMoments
+  .slice(0, 4)
+  .map((item, index) => `${index + 1}. ${item}`)
+  .join("\n")}
+
+Rules:
+- Use large text sparingly
+- Center-screen emphasis
+- Strong readability
+- Never spam this system
+
+SECTION 40 — Environment Transition on Completion
+───────────────────────────────────────────────
+- Calm ambient effects
+- Shift background slightly warmer / cleaner
+- Pulse final result once
+- Pause briefly before final stats card
+- Make completion feel like the end of a short film, not just a stopped animation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHASE 7 — ADVANCED CINEMATIC & INTELLIGENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 41 — Cinematic Camera Dynamics
+───────────────────────────────────
+- Default = wide shot
+- Auto close-up on critical comparison / jump / route update / merge
+- Gentle pan when focus region moves
+- Small impact shake only on major events
+- Dramatic zoom reserved for discovery / finish
+
+SECTION 42 — Post-Processing Film Layer
+─────────────────────────────────────
+- Subtle bloom on active glow
+- Very light film grain overlay
+- Mild vignette to keep focus centered
+- Chromatic aberration only if the algorithm personality supports aggression / speed
+- Keep readability above style
+
+SECTION 43 — Adaptive Timing (Speed Ramping)
+──────────────────────────────────────────
+Every step should respect its timingMult field.
+Use these rules:
+- boring / repetitive steps → faster
+- first major occurrence → slower
+- critical decision → slower
+- repetitive same-type runs → slightly faster
+- final step → slower for closure
+
+The precomputed steps array MUST include timingMult for every step.
+
+SECTION 44 — Atmospheric Ambient Particles
+────────────────────────────────────────
+Theme-specific particles should follow this scene:
+${buildAmbientParticles(analysis, creativeDirection)}
+
+Rules:
+- subtle by default
+- stronger only on key events
+- completion should settle particles rather than endlessly looping chaos
+
+SECTION 45 — Interactive Inspection Layer
+──────────────────────────────────────
+- Hover any main element:
+  show value + state + metadata if available
+- Hover connections / links:
+  show relation info if relevant
+- Click to pin:
+  keep one selected element highlighted
+- Optional X-Ray mode:
+  show raw variables + step number + structure state without blocking animation
+
+SECTION 46 — State Ghost / Diff Visualization
+────────────────────────────────────────────
+- Show previous-state ghost subtly behind changed elements
+- Highlight changed values
+- Show pointer movement trails
+- New additions should briefly glow brighter than stable ones
+- Diff visualization should support learning, not clutter
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PHASE 8 — SAFETY & ACCESSIBILITY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SECTION 47 — Fail-Safe Fallback System
+───────────────────────────────────
+Visualization must NEVER blank out.
+If something is uncertain:
+- still render base layout
+- still render main objects
+- still render captions
+- still keep controls usable
+
+Fallback rules:
+- unknown visualization detail → use clean metaphor-consistent substitute
+- invalid / empty input → show friendly message in-scene
+- failed step → show "step unavailable" gracefully and continue
+- no solution → show clear but non-crashing failure state
+
+SECTION 48 — Accessibility & Performance Guardrails
+─────────────────────────────────────────────────
+ACCESSIBILITY:
+- respect prefers-reduced-motion
+- pair color with labels / icons / shapes
+- keyboard controls:
+  Space = Play/Pause
+  ← / → = Prev / Next
+  R = Reset
+  E = Explain mode
+  H = Heatmap
+  X = X-Ray
+- captions / step changes should support aria-live announcements
+
+PERFORMANCE:
+- reuse DOM nodes where possible
+- prefer transforms over layout thrashing
+- keep animation smooth on a normal laptop
+- auto-reduce decorative effects if scene becomes too heavy
+- avoid memory leaks on replay or reset
+
+═══════════════════════════════════════════════════════════
+FINAL SELF-CHECK BEFORE GENERATING HTML
+═══════════════════════════════════════════════════════════
+✅ Metaphor is visible and specific
+✅ Hero character is actually present
+✅ Environment has multiple layers
+✅ Main data structure uses meaningful visual objects
+✅ Steps are precomputed and replayable
+✅ Captions are educational and human-readable
+✅ Controls exist and work
+✅ Keyboard shortcuts exist
+✅ Non-negotiable visual requirements are implemented
+✅ No blank screen fallback
+✅ Output ends with </html>
+
+═══════════════════════════════════════════════════════════
+FINAL REMINDER
+═══════════════════════════════════════════════════════════
+CRITICAL REQUIREMENTS:
+1. Generate the final result now as ONE complete HTML file only.
+2. The HTML MUST include a JavaScript array called STEPS with ALL algorithm steps.
+3. The STEPS array must have EXACTLY ${getSteps(analysis).length} steps.
+4. Each step object MUST include:
+   - step
+   - action
+   - caption
+   - variables
+   - highlight
+   - important
+   - timingMult
+5. There MUST be a renderStep(index) function that reads the current step and updates:
+   - the visual scene
+   - the caption
+   - the step counter
+   - the stats
+6. There MUST be working playback controls:
+   - Reset
+   - Prev
+   - Play/Pause
+   - Next
+   - Speed
+7. The Play button must move through all steps automatically.
+8. The step counter must NEVER show 0/0 unless there are truly no steps.
+9. The caption must preserve spaces between words.
+10. Word-by-word caption rendering must use spaces correctly, for example words.join(" ").
+11. Do not explain the code.
+12. Do not summarize it.
+13. Do not wrap it in markdown.
+14. Start with <!DOCTYPE html> and end with </html>.
+15. Only output the full HTML.
 `.trim();
 }
 
-// ═══════════════════════════════════════════════════
-// 4. COMBINE COMPACT PROMPT
-// Token-safe. Sent to HTML generator model.
-// Tells AI exactly what to generate in AIVisualizationOutput format.
-// ═══════════════════════════════════════════════════
-
-export function combineCompactPrompt(
-  analysis:  AnalysisResult,
-  creative:  CreativeScene,
-  technical: TechnicalSpec
+export function buildCompactPrompt(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection,
+  templateType: TemplateType = inferTemplateType(analysis)
 ): string {
+  const steps = getSteps(analysis);
+  const variables = getVariables(analysis);
+  const objectMapping = normalizeObjectMapping(creativeDirection.objectMapping);
 
-  // Compact steps (only what generator needs)
-  const stepsCompact = (analysis.steps || []).map(s => ({
-    step:      s.step,
-    action:    s.action,
-    caption:   s.caption,
-    vars:      s.variables,
-    important: s.important,
-    timing:    s.timingMult,
-  }));
+  return `
+Generate a SINGLE self-contained HTML algorithm visualization.
 
-  // Stats config for initVisualization
-  const statsConfig = Array.isArray(technical.layoutRules?.statsBar)
-    ? technical.layoutRules.statsBar
-        .map((s: any) => ({
-          key:   s.key   || s,
-          label: s.label || s,
-          value: 0,
-          side:  s.side  || 'left',
-        }))
-    : [
-        { key: 'comparisons', label: 'Comparisons', value: 0, side: 'left'  },
-        { key: 'swaps',       label: 'Swaps',       value: 0, side: 'left'  },
-        { key: 'currentStep', label: 'Step',        value: 0, side: 'right' },
-      ];
+Algorithm:
+- Name: ${safe(analysis.algorithmName)}
+- Category: ${safe(analysis.category)}
+- Language: ${safe(analysis.language)}
+- Template: ${templateType}
+- Time Complexity: ${safe(analysis.timeComplexity)}
+- Space Complexity: ${safe(analysis.spaceComplexity)}
+- Input Example: ${safe(analysis.inputExample)}
+- Expected Output: ${safe(analysis.expectedOutput)}
+- Key Insight: ${safe(analysis.keyInsight)}
 
-  return `You are an expert HTML/CSS/JS visualization coder.
-
-Generate a COMPLETE algorithm visualization using the prebuilt framework below.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ALGORITHM IDENTITY
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Algorithm:  ${analysis.algorithmName}
-Category:   ${analysis.category}
-Language:   ${analysis.language}
-Input:      ${analysis.inputExample}
-Output:     ${analysis.expectedOutput}
-Time:       ${analysis.timeComplexity}
-Space:      ${analysis.spaceComplexity || 'O(n)'}
-Template:   ${technical.templateType}
-Steps:      ${stepsCompact.length} total
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CREATIVE DIRECTION
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Metaphor:    ${creative.metaphor}
-Scene:       ${creative.sceneName}
-Hero:        ${creative.heroCharacter.type} — ${creative.heroCharacter.look}
-Hero Idle:   ${creative.heroCharacter.idleAnimation}
-Hero Move:   ${creative.heroCharacter.moveAnimation}
-Setting:     ${creative.environment.setting}
-Ambient:     ${creative.environment.ambientEffects.join(', ')}
-Background:  ${creative.colorPalette.background}
+Creative Direction:
+- Metaphor: ${safe(creativeDirection.metaphor)}
+- Scene: ${safe(creativeDirection.sceneName)}
+- Hero: ${safe(creativeDirection.heroCharacter.type)} — ${safe(
+    creativeDirection.heroCharacter.look
+  )}
+- Hero Idle: ${safe(creativeDirection.heroCharacter.idleAnimation)}
+- Hero Move: ${safe(creativeDirection.heroCharacter.moveAnimation)}
+- Environment: ${safe(creativeDirection.environment.setting)}
+- Background Layers: ${creativeDirection.environment.backgroundLayers.join(" | ")}
+- Ambient Effects: ${creativeDirection.environment.ambientEffects.join(" | ")}
 
 Object Mapping:
-${Object.entries(creative.objectMapping)
-  .map(([k, v]) => `  ${k} = ${v}`)
-  .join('\n')}
+${formatObjectMapping(objectMapping)}
 
-Colors:
-  primary=${creative.colorPalette.primary}
-  secondary=${creative.colorPalette.secondary}
-  accent=${creative.colorPalette.accent}
-  danger=${creative.colorPalette.danger}
+Color Palette:
+- primary: ${safe(creativeDirection.colorPalette.primary)}
+- secondary: ${safe(creativeDirection.colorPalette.secondary)}
+- accent: ${safe(creativeDirection.colorPalette.accent)}
+- danger: ${safe(creativeDirection.colorPalette.danger)}
+- background: ${safe(creativeDirection.colorPalette.background)}
 
-Animation Map:
-${Object.entries(technical.animationMapping)
-  .map(([k, v]) => `  ${k}: ${v}`)
-  .join('\n')}
+Important Variables:
+${variables.map((v) => `- ${v.name}: ${v.meaning}`).join("\n")}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-NON-NEGOTIABLE VISUAL REQUIREMENTS
-These MUST appear in output. No exceptions.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${creative.nonNegotiableVisualRequirements.map((r, i) => `${i + 1}. ${r}`).join('\n')}
+Non-Negotiable Visual Requirements:
+${creativeDirection.nonNegotiableVisualRequirements
+  .map((item, index) => `${index + 1}. ${item}`)
+  .join("\n")}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DRAMATIC MOMENTS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${creative.dramaticMoments.map(d => `  ★ ${d}`).join('\n')}
+Domain Animations:
+${creativeDirection.domainAnimations
+  .map((item, index) => `${index + 1}. ${item}`)
+  .join("\n")}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-STEP TRACE (${stepsCompact.length} steps)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${stepsCompact
-  .map(s =>
-    `${s.step}. [${s.action}${s.important ? ' ⭐' : ''}] ${s.caption}` +
-    (s.vars && Object.keys(s.vars).length > 0
-      ? '\n   vars: ' + JSON.stringify(s.vars)
-      : '')
+Dramatic Moments:
+${creativeDirection.dramaticMoments
+  .map((item, index) => `${index + 1}. ${item}`)
+  .join("\n")}
+
+Steps (${steps.length} total):
+${steps
+  .map(
+    (step) =>
+      `${step.step}. [${step.action}${step.important ? " ★" : ""}] ${step.caption} | vars=${compactJSON(
+        step.variables
+      )} | timing=${step.timingMult}`
   )
-  .join('\n')}
+  .join("\n")}
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-PREBUILT CONTRACT — DO NOT REGENERATE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-The following are ALREADY BUILT in the framework.
-Do NOT rewrite them. Reference them in your code.
+Required Output Rules:
+- Output ONLY one full HTML document
+- Use Vanilla HTML/CSS/JS
+- Must work in iframe srcdoc
+- MUST include const STEPS = [...] array with ALL ${getSteps(analysis).length} steps
+- Each step MUST have: step, action, caption, variables, highlight, important, timingMult
+- MUST include renderStep(index) function that updates visuals per step
+- MUST include playback controls: Reset, Prev, Play/Pause, Next, Speed
+- MUST show step counter as "X / Y" format (never show 0 / 0)
+- MUST show caption with proper spaces between words
+- Play button must auto-advance through all steps with timing delays
+- Include stats bar, caption bar, right sidebar
+- No markdown
+- HTML must start with <!DOCTYPE html> and end with </html>
+- Must look specific to ${safe(analysis.algorithmName)}, not generic
+- Word-by-word caption must use words.join(" ") with spaces preserved
+`.trim();
+}
 
-Fixed HTML (already in DOM):
-  #stats-bar      — top stats bar
-  #scene-area     — main visualization area
-  #scene-content  — inner scene (your elements go here)
-  #svg-canvas     — SVG for lines/arrows
-  #caption-bar    — bottom caption
-  #controls-bar   — playback controls
-  #sidebar-panel  — right sidebar
-  #completion-overlay — end screen
+export function inferTemplateType(analysis: AnalysisResult): TemplateType {
+  const category = safe(analysis.category).toLowerCase();
+  const ds = getDataStructures(analysis).join(" ").toLowerCase();
+  const name = safe(analysis.algorithmName).toLowerCase();
 
-Fixed JS (available globally):
-  initVisualization(config) — call this ONCE at end of your script
-  renderStep(index)         — called by engine, calls renderScene()
-  setCaption(text, i, important)
-  showImportantCaption(text, i)
-  updateStat(key, value)
-  updateVariables(vars)
-  clearScene()
-  clearSVG()
-  getSceneDimensions()
-  createElement(tag, attrs, styles, parent)
-  addToScene(el)
-  showToast(msg, type)
+  if (
+    category.includes("graph") ||
+    ds.includes("graph") ||
+    name.includes("dijkstra") ||
+    name.includes("bfs") ||
+    name.includes("dfs")
+  ) {
+    return "graph";
+  }
 
-Animation utils (call directly):
-  moveTo, moveArc, moveArcHigh, springTo
-  fadeIn, fadeOut, fadeInUp, fadeOutUp, fadeInScale
-  highlight, glowPulse, glowFlash, spotlight, neonFlicker
-  popIn, popOut, breathe, squashAndStretch, shake, wobble, jello
-  typeWords, countUp, valueChange, dramaticText
-  splashBurst, confettiBurst, ripple, shockwave, sparkle, bubbles
-  waterFill, waterRipple, waterSplash, waterDrop
-  drawLine, drawArc, drawArrow, connectionBeam
-  zoomIn, zoomOut, cameraShake, focusOn
-  markSorted, markActive, markVisited, markCurrent, markError
-  characterIdle, characterJump, characterCelebrate, characterWalk
-  celebrationWave, victoryBurst, goldOutline, finalReveal
-  stagger, sequence, chainAnimations, delay
+  if (category.includes("tree") || ds.includes("tree")) {
+    return "tree";
+  }
 
-Template already in DOM (${technical.templateType}):
-  Use existing element IDs from the ${technical.templateType} template.
-  Do NOT recreate the template structure.
+  if (category.includes("dp") || name.includes("dynamic programming")) {
+    return "dp";
+  }
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-WHAT YOU MUST GENERATE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Generate a JSON object with these exact fields:
+  if (
+    category.includes("stack") ||
+    category.includes("queue") ||
+    ds.includes("stack") ||
+    ds.includes("queue")
+  ) {
+    return "stackqueue";
+  }
 
-{
-  "templateType": "${technical.templateType}",
+  if (
+    category.includes("recursion") ||
+    category.includes("backtracking") ||
+    ds.includes("call stack") ||
+    name.includes("recursion")
+  ) {
+    return "recursion";
+  }
 
-  "customCSS": "/* All algorithm-specific CSS here */",
+  return "array";
+}
 
-  "sceneHTML": "<!-- Any EXTRA scene HTML beyond the template -->",
+// ═══════════════════════════════════════════════════
+// INTERNAL HELPERS
+// ═══════════════════════════════════════════════════
 
-  "sceneScript": "/* Complete JS:
-    1. window.STEPS = [...] — precomputed array of ALL ${stepsCompact.length} steps
-       Each step: { step, action, caption, variables, highlight, important, timingMult }
-    2. function renderScene(step, index) { ... } — visual updates per step
-    3. initVisualization({
-         steps: window.STEPS,
-         algorithmName: '${analysis.algorithmName}',
-         timeComplexity: '${analysis.timeComplexity}',
-         spaceComplexity: '${analysis.spaceComplexity || ''}',
-         stats: ${JSON.stringify(statsConfig)},
-         boldKeywords: [...algorithm-specific words...],
-         baseInterval: ${technical.baseInterval ?? 1200},
-         completionConfig: {
-           emoji: '🎉',
-           title: '...',
-           subtitle: '...',
-           stats: [...]
-         },
-         onInit: function() { ...build initial scene DOM... }
-       });
-    */",
+interface NormalizedStep {
+  step: number;
+  description: string;
+  caption: string;
+  variables: Record<string, unknown>;
+  highlight: number[];
+  action: string;
+  important: boolean;
+  timingMult: number;
+}
 
-  "sceneConfig": {
-    "algorithmName": "${analysis.algorithmName}",
-    "timeComplexity": "${analysis.timeComplexity}",
-    "spaceComplexity": "${analysis.spaceComplexity || ''}",
-    "stats": ${JSON.stringify(statsConfig)},
-    "boldKeywords": [],
-    "baseInterval": ${technical.baseInterval ?? 1200}
+interface NormalizedVariable {
+  name: string;
+  meaning: string;
+}
+
+interface StatSpec {
+  key: string;
+  label: string;
+}
+
+function getSteps(analysis: AnalysisResult): NormalizedStep[] {
+  const raw = Array.isArray((analysis as any).steps) ? (analysis as any).steps : [];
+
+  return raw.map((step: any, index: number) => ({
+    step: typeof step?.step === "number" ? step.step : index + 1,
+    description:
+      typeof step?.description === "string" && step.description.trim()
+        ? step.description
+        : `Step ${index + 1}`,
+    caption:
+      typeof step?.caption === "string" && step.caption.trim()
+        ? step.caption
+        : typeof step?.description === "string" && step.description.trim()
+        ? step.description
+        : `Step ${index + 1}`,
+    variables:
+      step?.variables && typeof step.variables === "object" && !Array.isArray(step.variables)
+        ? step.variables
+        : {},
+    highlight: Array.isArray(step?.highlight) ? step.highlight : [],
+    action:
+      typeof step?.action === "string" && step.action.trim()
+        ? step.action
+        : index === 0
+        ? "initialize"
+        : index === raw.length - 1
+        ? "complete"
+        : "process",
+    important:
+      typeof step?.important === "boolean"
+        ? step.important
+        : index === 0 || index === raw.length - 1,
+    timingMult:
+      typeof step?.timingMult === "number" && Number.isFinite(step.timingMult)
+        ? step.timingMult
+        : 1,
+  }));
+}
+
+function getVariables(analysis: AnalysisResult): NormalizedVariable[] {
+  const raw = Array.isArray((analysis as any).variables) ? (analysis as any).variables : [];
+
+  return raw.map((item: any) => {
+    if (typeof item === "string") {
+      return { name: item, meaning: item };
+    }
+
+    return {
+      name:
+        typeof item?.name === "string" && item.name.trim() ? item.name : "variable",
+      meaning:
+        typeof item?.meaning === "string" && item.meaning.trim()
+          ? item.meaning
+          : typeof item?.name === "string"
+          ? item.name
+          : "algorithm variable",
+    };
+  });
+}
+
+function getDataStructures(analysis: AnalysisResult): string[] {
+  const raw = Array.isArray((analysis as any).dataStructures)
+    ? (analysis as any).dataStructures
+    : [];
+
+  return raw.map((item: unknown) => String(item));
+}
+
+function safe(value: unknown, fallback = "Not specified"): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value === null || value === undefined) return fallback;
+  const text = String(value).trim();
+  return text || fallback;
+}
+
+function compactJSON(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "{}";
   }
 }
 
-CRITICAL RULES:
-1. Output ONLY the JSON object — no text before or after
-2. sceneScript must be complete working JavaScript
-3. window.STEPS must have ALL ${stepsCompact.length} steps
-4. renderScene() must handle ALL action types: ${[...new Set((analysis.steps || []).map(s => s.action))].join(', ')}
-5. initVisualization() must be called EXACTLY ONCE at the end
-6. Use the creative direction — hero character MUST appear
-7. Non-negotiable requirements MUST be implemented
-8. customCSS must use the color palette provided
-9. No external fetches, no CDN imports
-10. All animations use the prebuilt utility functions`;
+function estimateInputSize(inputExample: string, stepCount: number): number {
+  const text = safe(inputExample, "");
+  const arrayMatches = text.match(/-?\d+/g);
+
+  if (arrayMatches && arrayMatches.length > 0) {
+    return arrayMatches.length;
+  }
+
+  if (text.includes(",")) {
+    return Math.max(2, text.split(",").length);
+  }
+
+  return Math.max(2, Math.min(stepCount, 12));
 }
 
-// ═══════════════════════════════════════════════════
-// CREATIVITY HINTS — Category-specific
-// ═══════════════════════════════════════════════════
+function inferDetailLevel(n: number): string {
+  if (n < 15) return "full";
+  if (n < 50) return "moderate";
+  if (n < 100) return "reduced";
+  return "simplified";
+}
 
-function getCreativityHints(category: string): string {
-  const hints: Record<string, string> = {
-    Sorting: `CREATIVITY HINTS FOR SORTING:
-Think: bubbles rising in water, blocks falling by gravity, cards being dealt by a dealer.
-Hero ideas: floating bubble, weighted block, card dealer's hand, gravity sorter machine.
-Environment: underwater bubble stream, physics sandbox, card table under spotlight.
-Key visuals:
-  - Swap = two elements arc over each other (parabolic path, not teleport)
-  - Sorted portion = green wave spreading left to right
-  - Active comparison = golden spotlight on two elements
-  - Each pass should feel like a physical "settling" motion`,
+function inferStats(analysis: AnalysisResult): StatSpec[] {
+  const category = safe(analysis.category).toLowerCase();
+  const name = safe(analysis.algorithmName).toLowerCase();
 
-    "Divide & Conquer": `CREATIVITY HINTS FOR DIVIDE & CONQUER:
-Think: surgeon making precise cuts, librarian splitting book piles, DNA splitting.
-Hero ideas: surgeon's hands, librarian, DNA strand splitter, crystal splitting tool.
-Environment: surgical theater, library with book piles, crystal laboratory.
-Key visuals:
-  - Split = crack animation → elements drift apart → gap grows
-  - Each level = one floor deeper in a building
-  - Merge = zipper closing or puzzle pieces snapping together
-  - Completion = building reconstructed floor by floor`,
+  if (category.includes("sorting")) {
+    return [
+      { key: "comparisons", label: "Comparisons" },
+      { key: "swaps", label: "Swaps" },
+      { key: "currentStep", label: "Step" },
+      { key: "pass", label: "Pass" },
+    ];
+  }
 
-    Graph: `CREATIVITY HINTS FOR GRAPH:
-Think: GPS navigator finding routes, explorer mapping caves, ink spreading on paper.
-Hero ideas: GPS pin/car, explorer with torch, data packet, ink drop.
-Environment: city map view, cave system, paper map, network hub room.
-Key visuals:
-  - BFS = ripple wave expanding outward from source
-  - DFS = torch beam moving deep, darkness returns on backtrack
-  - Edge traversal = road lighting up as car drives it
-  - Shortest path = golden highlighted route
-  - Unvisited nodes = dark/dim, visited = lit up`,
+  if (category.includes("graph")) {
+    return [
+      { key: "visited", label: "Visited" },
+      { key: "frontier", label: "Frontier" },
+      { key: "distance", label: "Best Distance" },
+      { key: "currentStep", label: "Step" },
+    ];
+  }
 
-    "Binary Search": `CREATIVITY HINTS FOR BINARY SEARCH:
-Think: detective eliminating suspects, sniper narrowing crosshair, librarian finding book.
-Hero ideas: detective with magnifying glass, sniper scope, library assistant.
-Environment: suspect lineup, foggy range, endless bookshelf corridor.
-Key visuals:
-  - Eliminated half = tilts sideways and fades out
-  - Active search range = bright spotlight narrowing
-  - Mid element = emphasized with golden glow
-  - Found = bullseye hit, neon sign lights up, confetti`,
+  if (category.includes("dp")) {
+    return [
+      { key: "cellsFilled", label: "Cells Filled" },
+      { key: "currentValue", label: "Current Value" },
+      { key: "currentStep", label: "Step" },
+      { key: "best", label: "Best So Far" },
+    ];
+  }
 
-    Tree: `CREATIVITY HINTS FOR TREE:
-Think: bird hopping between branches, family tree explorer, file system navigator.
-Hero ideas: bird, tree climber, data packet traveling branches, glowing orb.
-Environment: ancient mystical tree, family tree wall, glowing circuit tree.
-Key visuals:
-  - Node visit = glows up as character arrives
-  - Edge traversal = branch lights up sequentially
-  - Backtrack = path dims back
-  - Tree sways gently in idle state`,
+  if (category.includes("binary search")) {
+    return [
+      { key: "left", label: "Left" },
+      { key: "mid", label: "Mid" },
+      { key: "right", label: "Right" },
+      { key: "currentStep", label: "Step" },
+    ];
+  }
 
-    DP: `CREATIVITY HINTS FOR DP:
-Think: puzzle master placing pieces, architect filling a building blueprint, memory palace.
-Hero ideas: puzzle master, architect's hand, memory crystal, brick layer.
-Environment: puzzle workshop, blueprint table, glowing memory grid room.
-Key visuals:
-  - Cell fill = puzzle piece slides in with satisfying click
-  - Dependency arrows = glowing lines showing where values come from
-  - Optimal path = golden trail traced back through table
-  - Completion = full table glows, puzzle complete`,
+  if (name.includes("frog")) {
+    return [
+      { key: "energy", label: "Energy" },
+      { key: "position", label: "Position" },
+      { key: "bestJump", label: "Best Jump" },
+      { key: "currentStep", label: "Step" },
+    ];
+  }
 
-    "Two Pointers": `CREATIVITY HINTS FOR TWO POINTERS:
-Think: two scanners converging from opposite sides, pincer military move, two spotlights.
-Hero ideas: two colored beams/scanners, left=green explorer right=red explorer.
-Environment: dark corridor with two lights approaching each other.
-Key visuals:
-  - Left pointer = green beacon moving right
-  - Right pointer = red beacon moving left
-  - Valid pair found = beams meet with spark collision
-  - Sum too small = green moves right (needs bigger)
-  - Sum too big = red moves left (needs smaller)`,
+  if (name.includes("rain water") || name.includes("trapping")) {
+    return [
+      { key: "leftMax", label: "Left Max" },
+      { key: "rightMax", label: "Right Max" },
+      { key: "water", label: "Water" },
+      { key: "currentStep", label: "Step" },
+    ];
+  }
 
-    Stack: `CREATIVITY HINTS FOR STACK:
-Think: chef stacking plates, tower of blocks, undo history stack.
-Hero ideas: chef's hands, construction crane, magic floating tray.
-Environment: busy kitchen counter, construction site, wizard's potion lab.
-Key visuals:
-  - Push = item slides down from top with bounce landing
-  - Pop = top item flies upward and off screen
-  - Stack overflow = wobbling tower about to fall
-  - Top marker = glowing halo on topmost item`,
+  return [
+    { key: "currentStep", label: "Step" },
+    { key: "progress", label: "Progress" },
+    { key: "active", label: "Active" },
+    { key: "result", label: "Result" },
+  ];
+}
 
-    Queue: `CREATIVITY HINTS FOR QUEUE:
-Think: people waiting in line, airport conveyor belt, printer job queue.
-Hero ideas: queue manager, conveyor belt, ticket dispenser.
-Environment: airport terminal, amusement park queue, post office.
-Key visuals:
-  - Enqueue = new person/item slides in from right end
-  - Dequeue = front item slides out left and disappears
-  - Front/Rear markers = glowing arrows at each end
-  - Queue fills up = items pack tighter`,
+function normalizeObjectMapping(
+  mapping: Record<string, string> | undefined
+): Record<string, string> {
+  if (!mapping || Object.keys(mapping).length === 0) {
+    return {
+      input: "problem-specific scene objects",
+      activeState: "focused highlighted object",
+      result: "resolved final state",
+    };
+  }
 
-    Recursion: `CREATIVITY HINTS FOR RECURSION:
-Think: Russian dolls opening, mirrors reflecting mirrors, dream within a dream.
-Hero ideas: time traveler going to smaller versions, mirror reflections.
-Environment: infinite corridor of mirrors, nested dream rooms, fractal landscape.
-Key visuals:
-  - Each recursive call = smaller glowing frame appears inside current
-  - Base case = innermost frame, solid gold color
-  - Return = frame closes and value floats up to parent
-  - Call stack depth = visible as physical depth/layers`,
+  return mapping;
+}
 
-    Greedy: `CREATIVITY HINTS FOR GREEDY:
-Think: treasure hunter always grabbing nearest gold, opportunistic food collector.
-Hero ideas: treasure hunter, pirate, magpie bird collecting shiny things.
-Environment: treasure cave, pirate ship deck, forest floor with items.
-Key visuals:
-  - Chosen item = golden glow, character grabs it confidently
-  - Rejected items = gray fade, crossed out
-  - Decision point = spotlight on available choices
-  - Running total = treasure chest filling up`,
+function formatObjectMapping(mapping: Record<string, string>): string {
+  return Object.entries(mapping)
+    .map(([key, value]) => `- ${key} → ${value}`)
+    .join("\n");
+}
 
-    Backtracking: `CREATIVITY HINTS FOR BACKTRACKING:
-Think: maze explorer trying paths, lock combination cracker, cautious detective.
-Hero ideas: maze runner, lockpick expert, cautious explorer with flashlight.
-Environment: dark maze, foggy forest with dead ends, mysterious room with locked doors.
-Key visuals:
-  - Forward move = cautious step, path lights up green
-  - Dead end = red flash, path goes dark, character steps back
-  - Backtrack = footsteps retrace, light fades
-  - Solution found = full path illuminates golden`,
+function buildSemanticColorMap(creativeDirection: CreativeDirection): string {
+  return `
+SEMANTIC COLOR MAP:
+- Primary ${safe(creativeDirection.colorPalette.primary)}: default scene identity / major object body
+- Secondary ${safe(creativeDirection.colorPalette.secondary)}: support layer / secondary object state
+- Accent ${safe(creativeDirection.colorPalette.accent)}: active, selected, currently important
+- Danger ${safe(creativeDirection.colorPalette.danger)}: error, rejection, conflict, bad comparison, failed path
+- Background ${safe(creativeDirection.colorPalette.background)}: cinematic scene base
+
+COLOR RULES:
+- Never rely on color alone; combine with labels, icons, shape, glow, or pattern
+- Active state should become more saturated, not just different
+- Final stable state should feel calmer and cleaner than active state
+- Use smooth transitions of at least 250-300ms where readable
+`.trim();
+}
+
+function inferFamousProblem(analysis: AnalysisResult): string {
+  const name = safe(analysis.algorithmName).toLowerCase();
+
+  if (name.includes("trapping rain water")) return "LeetCode 42 — Trapping Rain Water";
+  if (name.includes("frog jump")) return "Classic Frog Jump / DP-style stepping problem";
+  if (name.includes("bubble sort")) return "Classic Bubble Sort";
+  if (name.includes("binary search")) return "Classic Binary Search";
+  if (name.includes("dijkstra")) return "Classic Dijkstra Shortest Path";
+  if (name.includes("merge sort")) return "Classic Merge Sort";
+  if (name.includes("quick sort")) return "Classic Quick Sort";
+  return "Inferred from submitted code";
+}
+
+function inferFunctionNames(analysis: AnalysisResult): string {
+  const text = safe(analysis.description, "");
+  const functionMatches = text.match(/[a-zA-Z_]\w*\(/g);
+
+  if (functionMatches && functionMatches.length) {
+    return Array.from(new Set(functionMatches.map((item) => item.replace("(", "")))).join(", ");
+  }
+
+  return "Derived from submitted code";
+}
+
+function buildInputMeaning(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const objectMapping = normalizeObjectMapping(creativeDirection.objectMapping);
+  const first = objectMapping.array || objectMapping.input || objectMapping["array values"];
+
+  if (first) {
+    return `${safe(analysis.inputExample)} should visually appear as ${first}.`;
+  }
+
+  return `The input should become concrete scene objects that match "${safe(
+    creativeDirection.sceneName
+  )}".`;
+}
+
+function buildIndexMeaning(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const category = safe(analysis.category).toLowerCase();
+
+  if (category.includes("graph")) {
+    return "Indices or positions represent map coordinates, processing order, or node identity in the route network.";
+  }
+
+  if (category.includes("tree")) {
+    return "Positions represent hierarchy depth, branch placement, and parent-child structure.";
+  }
+
+  return "Indices should represent physical slots, stone positions, building blocks, shelves, lanes, or ordered locations in the scene.";
+}
+
+function buildPointerMeaning(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const variables = getVariables(analysis);
+  const pointerLike = variables.filter((v) =>
+    /(left|right|i|j|k|mid|ptr|pointer|lo|hi|start|end|slow|fast)/i.test(v.name)
+  );
+
+  if (pointerLike.length === 0) {
+    return "Active variables should still appear as visible markers, labels, highlights, or guide beams near the relevant scene objects.";
+  }
+
+  return pointerLike
+    .map((v) => {
+      const mapped =
+        creativeDirection.objectMapping[v.name] ||
+        creativeDirection.objectMapping[`${v.name}Pointer`] ||
+        `${v.name} marker`;
+      return `- ${v.name}: ${v.meaning} → visualized as ${mapped}`;
+    })
+    .join("\n");
+}
+
+function buildPhysicalProcessMeaning(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  return `${safe(
+    creativeDirection.metaphor
+  )} The process should visually explain why decisions are made at each step.`;
+}
+
+function buildResultMeaning(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  return (
+    creativeDirection.objectMapping.result ||
+    `The result should feel like the scene has been resolved into "${safe(
+      analysis.expectedOutput
+    )}".`
+  );
+}
+
+function buildAuxiliaryMeaning(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const ds = getDataStructures(analysis)
+    .filter((item) => item.toLowerCase() !== "array")
+    .map((item) => item.toLowerCase());
+
+  if (ds.length === 0) {
+    return "If no major auxiliary structure exists, use the sidebar to show live variables and state memory.";
+  }
+
+  return ds
+    .map((item) => {
+      if (item.includes("stack")) {
+        return "- stack → visible stack of cards, trays, plates, or call frames";
+      }
+      if (item.includes("queue")) {
+        return "- queue → waiting line, conveyor lane, or frontier tray";
+      }
+      if (item.includes("graph")) {
+        return "- graph metadata → route panel, distance labels, or visited legend";
+      }
+      if (item.includes("tree")) {
+        return "- tree support → branch highlights, traversal result strip, depth labels";
+      }
+      if (item.includes("call stack")) {
+        return "- call stack → layered recursive frame cards in sidebar";
+      }
+      return `- ${item} → visible support structure in sidebar or scene overlay`;
+    })
+    .join("\n");
+}
+
+function inferPrimaryStructure(analysis: AnalysisResult): string {
+  const template = inferTemplateType(analysis);
+
+  switch (template) {
+    case "graph":
+      return "Graph / route network";
+    case "tree":
+      return "Hierarchical tree";
+    case "dp":
+      return "DP table / memo structure";
+    case "stackqueue":
+      return "Stack / queue operation structure";
+    case "recursion":
+      return "Recursive frames + main data view";
+    default:
+      return "Ordered linear structure (array / list / sequence)";
+  }
+}
+
+function inferPrimaryVisualForm(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const template = inferTemplateType(analysis);
+
+  switch (template) {
+    case "graph":
+      return "glowing nodes and edges arranged as a route map or network";
+    case "tree":
+      return "branching nodes with clear levels and connecting edges";
+    case "dp":
+      return "cells or tiles in a grid / row with formula-aware labels";
+    case "stackqueue":
+      return "cards, blocks, trays, or waiting-line objects with clear order";
+    case "recursion":
+      return "main data structure plus recursive frame cards and return flow";
+    default:
+      return (
+        creativeDirection.objectMapping.array ||
+        "ordered scene objects laid out linearly with values and active markers"
+      );
+  }
+}
+
+function inferValueToVisualMapping(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const name = safe(analysis.algorithmName).toLowerCase();
+
+  if (name.includes("rain water")) {
+    return "Value height ∝ building height, and trapped result ∝ visible water depth between buildings.";
+  }
+
+  if (name.includes("frog")) {
+    return "Indices map to stone positions, and computed cost / energy appears above or near each stone.";
+  }
+
+  if (name.includes("bubble sort")) {
+    return "Value can influence size, order, or floating level, while state influences glow and motion.";
+  }
+
+  return `Values should map to physically understandable differences such as height, position, label, distance, fill level, or emphasis within "${safe(
+    creativeDirection.sceneName
+  )}".`;
+}
+
+function buildSecondaryStructures(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const variables = getVariables(analysis);
+
+  if (variables.length === 0) {
+    return "- No named secondary structures extracted; use sidebar variables and status chips.";
+  }
+
+  return variables
+    .map((v) => {
+      const mapping =
+        creativeDirection.objectMapping[v.name] ||
+        `${v.name} badge / guide marker / state label`;
+      return `- ${v.name} → ${mapping} → ${v.meaning}`;
+    })
+    .join("\n");
+}
+
+function buildTrackedVariablesList(analysis: AnalysisResult): string {
+  const variables = getVariables(analysis);
+
+  if (variables.length === 0) {
+    return "- Track current step index, active state, and result progress.";
+  }
+
+  return variables
+    .map((v) => `- ${v.name}: ${v.meaning}`)
+    .join("\n");
+}
+
+function buildDetailedStepTrace(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const steps = getSteps(analysis);
+
+  return steps
+    .map((step) => {
+      const visualChange = inferVisualChangeForAction(
+        step.action,
+        analysis,
+        creativeDirection,
+        step
+      );
+      const sceneMeaning = inferSceneMeaningForAction(
+        step.action,
+        analysis,
+        creativeDirection,
+        step
+      );
+      const whyThisMatters = inferWhyThisMatters(
+        step.action,
+        analysis,
+        step
+      );
+
+      return `STEP ${step.step}${step.important ? " ⭐" : ""}:
+  State: ${compactJSON(step.variables)}
+  Technical Action: ${step.description}
+  Visual Change: ${visualChange}
+  Scene Meaning: ${sceneMeaning}
+  Why This Matters: ${whyThisMatters}
+  Caption: ${step.caption}
+  timingMult: ${step.timingMult}`;
+    })
+    .join("\n\n");
+}
+
+function buildEdgeCaseSection(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const edgeCases = Array.isArray((analysis as any).edgeCases)
+    ? ((analysis as any).edgeCases as unknown[]).map((item) => String(item))
+    : [];
+
+  if (edgeCases.length === 0) {
+    return `- Empty input → show calm empty scene with friendly message, controls mostly disabled
+- Single element → show one resolved object already in final state
+- Already solved input → quick confirmation animation and completion
+- Invalid input → graceful in-scene error card using ${safe(
+      creativeDirection.colorPalette.danger
+    )}`;
+  }
+
+  return edgeCases
+    .map((edge) => {
+      const lower = edge.toLowerCase();
+
+      if (lower.includes("empty")) {
+        return `- ${edge}
+  Visual behavior: empty but themed scene with message card
+  Caption message: "There is nothing to process here yet."
+  Controls disabled: Play/Next disabled, Reset allowed`;
+      }
+
+      if (lower.includes("single")) {
+        return `- ${edge}
+  Visual behavior: one object enters and is immediately marked resolved
+  Caption message: "Only one item exists, so the answer is already settled."
+  Controls disabled: Playback can be minimal but still available`;
+      }
+
+      if (lower.includes("already")) {
+        return `- ${edge}
+  Visual behavior: short confirmation sweep, then completion
+  Caption message: "Everything is already in the right place."
+  Controls disabled: No`;
+      }
+
+      if (lower.includes("invalid")) {
+        return `- ${edge}
+  Visual behavior: themed warning panel in-scene, no crash
+  Caption message: "This input cannot be visualized in its current form."
+  Controls disabled: Play disabled, Reset allowed`;
+      }
+
+      if (lower.includes("no solution") || lower.includes("not found")) {
+        return `- ${edge}
+  Visual behavior: failure glow and respectful end state
+  Caption message: "We checked every valid path, but no answer was found."
+  Controls disabled: No`;
+      }
+
+      return `- ${edge}
+  Visual behavior: preserve scene theme, show special-case state clearly
+  Caption message: explain the case in plain human language
+  Controls disabled: only if playback would be meaningless`;
+    })
+    .join("\n\n");
+}
+
+function inferLayoutDescription(
+  templateType: TemplateType,
+  analysis: AnalysisResult
+): string {
+  switch (templateType) {
+    case "graph":
+      return "graph canvas with nodes and connecting routes";
+    case "tree":
+      return "top-down hierarchy with centered parent-child spacing";
+    case "dp":
+      return "table or tiled grid with supporting formula / dependency overlays";
+    case "stackqueue":
+      return "physical stack or queue lane with operation history";
+    case "recursion":
+      return "central active scene plus visible recursive call stack";
+    default:
+      return "linear array / bar / object strip with room for markers and character movement";
+  }
+}
+
+function inferElementShape(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const name = safe(analysis.algorithmName).toLowerCase();
+
+  if (name.includes("bubble")) return "rounded capsules / bubbles";
+  if (name.includes("rain")) return "buildings, basins, beacons, water shapes";
+  if (name.includes("frog")) return "stones / lily pads / glowing markers";
+  if (inferTemplateType(analysis) === "graph") return "circles / pins / route nodes";
+  if (inferTemplateType(analysis) === "tree") return "branch nodes with rounded cards";
+  return "rounded cards, themed blocks, or problem-specific objects";
+}
+
+function inferElementSizeRule(templateType: TemplateType, n: number): string {
+  switch (templateType) {
+    case "graph":
+      return "node radius scales with viewport and label density; keep labels readable above all";
+    case "tree":
+      return "node size decreases slightly with depth and total node count";
+    case "dp":
+      return `cell size = clamp(28px, ${Math.max(
+        32,
+        90 - n
+      )}px, 72px) depending on rows/cols`;
+    default:
+      return `element width = responsive clamp based on n ≈ ${n}; preserve label readability before decoration`;
+  }
+}
+
+function inferTypography(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const personality = inferAlgorithmPersonality(analysis);
+
+  return `${personality.typography} for headers, clean readable sans-serif for captions and stats.`;
+}
+
+function buildColorPaletteLines(creativeDirection: CreativeDirection): string {
+  return `- default/untouched → ${safe(creativeDirection.colorPalette.primary)}
+- active/comparing → ${safe(creativeDirection.colorPalette.accent)}
+- processing left / first side → ${safe(creativeDirection.colorPalette.secondary)}
+- processing right / opposite side → ${safe(creativeDirection.colorPalette.danger)}
+- swapping/modifying → ${safe(creativeDirection.colorPalette.accent)}
+- sorted/finalized → calmer resolved variant of ${safe(
+    creativeDirection.colorPalette.primary
+  )}
+- frontier/candidate → brighter accent highlight
+- special / key object → strongest glow using accent + rim light
+- eliminated/out → dimmed desaturated version of base colors
+- error/stale → ${safe(creativeDirection.colorPalette.danger)}
+- created/new → brief bright bloom then settle
+- result/merged → polished success state with balanced glow`;
+}
+
+function buildSceneAssets(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const assets = new Set<string>();
+
+  creativeDirection.environment.backgroundLayers.forEach((item) =>
+    assets.add(item)
+  );
+  creativeDirection.environment.ambientEffects.forEach((item) =>
+    assets.add(item)
+  );
+  creativeDirection.domainAnimations.forEach((item) => assets.add(item));
+
+  const algorithm = safe(analysis.algorithmName).toLowerCase();
+
+  if (algorithm.includes("rain")) {
+    assets.add("rain streaks");
+    assets.add("water basins");
+    assets.add("wet building reflections");
+  }
+
+  if (algorithm.includes("frog")) {
+    assets.add("frog hero");
+    assets.add("stones or lily pads");
+    assets.add("water ripples");
+  }
+
+  if (algorithm.includes("bubble")) {
+    assets.add("underwater particles");
+    assets.add("soft bubbles");
+    assets.add("current lines");
+  }
+
+  return Array.from(assets)
+    .map((item) => `- ${item}`)
+    .join("\n");
+}
+
+function inferCoordinateSystem(templateType: TemplateType): string {
+  switch (templateType) {
+    case "graph":
+      return "graph network with fixed or semi-fixed node coordinates";
+    case "tree":
+      return "level-based hierarchy with parent-centered branching";
+    case "dp":
+      return "grid / table coordinate system";
+    case "stackqueue":
+      return "single-axis ordered lane";
+    case "recursion":
+      return "central scene + stacked side frame coordinates";
+    default:
+      return "horizontal linear coordinate system";
+  }
+}
+
+function buildSpacingFormulas(templateType: TemplateType, n: number): string {
+  switch (templateType) {
+    case "graph":
+      return `- Node positions should preserve clear edges and readable labels
+- Edge routing should avoid heavy overlap
+- Active route should have enough breathing room for glow and travel animation`;
+    case "tree":
+      return `- y(level) = topPadding + level * verticalGap
+- sibling spacing widens for upper levels and compresses slightly for lower dense levels
+- keep subtree centering visually balanced`;
+    case "dp":
+      return `- x(col) = leftPadding + col * cellWidth
+- y(row) = topPadding + row * cellHeight
+- formula labels should appear above or beside active cells`;
+    default:
+      return `- x(i) = leftPadding + i * gap
+- gap adjusts based on n ≈ ${n}
+- y baseline remains stable while values / states animate above it`;
+  }
+}
+
+function inferViewportBehavior(templateType: TemplateType, n: number): string {
+  if (n > 100) {
+    return "prefer simplified view with scroll or viewport windowing";
+  }
+
+  if (templateType === "graph") {
+    return "auto-fit graph bounds with margin and avoid edge clipping";
+  }
+
+  return "auto-fit main structure within safe scene area; allow gentle scaling if necessary";
+}
+
+function inferIntroEntryMotion(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const algorithm = safe(analysis.algorithmName).toLowerCase();
+
+  if (algorithm.includes("frog")) return "soft rise from the water with moonlit glow";
+  if (algorithm.includes("rain")) return "fade in through rain and mist with vertical reveal";
+  if (algorithm.includes("bubble")) return "float upward from below with soft wobble";
+
+  return `staggered ${safe(
+    creativeDirection.heroCharacter.moveAnimation
+  )} feel mixed with fade and scale`;
+}
+
+function buildInitialValues(analysis: AnalysisResult): string {
+  const variables = getVariables(analysis);
+  const steps = getSteps(analysis);
+  const firstStep = steps[0];
+
+  const lines = variables.map((v) => {
+    const value =
+      firstStep && Object.prototype.hasOwnProperty.call(firstStep.variables, v.name)
+        ? (firstStep.variables as any)[v.name]
+        : "initial / inferred";
+    return `- ${v.name} = ${String(value)} (${v.meaning})`;
+  });
+
+  if (lines.length === 0) {
+    return "- Initialize main structure from input\n- Initialize current step = 1\n- Initialize stats to zero";
+  }
+
+  return lines.join("\n");
+}
+
+function inferSwapAnimation(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const name = safe(analysis.algorithmName).toLowerCase();
+
+  if (name.includes("bubble")) {
+    return "two bubble objects crossing in curved underwater arcs";
+  }
+
+  if (name.includes("rain")) {
+    return "beacons and active highlights shift roof-to-roof rather than swapping bodies";
+  }
+
+  return "parabolic arc crossing with clear left/right identity preserved";
+}
+
+function inferCreationSequence(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const templateType = inferTemplateType(analysis);
+
+  if (templateType === "graph") {
+    return "soft node pop-in, line draw, then label reveal";
+  }
+
+  if (templateType === "tree") {
+    return "node drop-in with branch draw and gentle settle";
+  }
+
+  return `ghost outline → fill reveal → label settle → gentle idle state within "${safe(
+    creativeDirection.sceneName
+  )}"`;
+}
+
+function inferDestructionSequence(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const category = safe(analysis.category).toLowerCase();
+
+  if (category.includes("binary search")) {
+    return "tilt, dim, and collapse out of active range";
+  }
+
+  if (category.includes("backtracking")) {
+    return "path fades and retracts with a step-back feel";
+  }
+
+  return "fade, shrink slightly, and release particles or light depending on scene tone";
+}
+
+function buildPointerRules(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const variables = getVariables(analysis);
+
+  if (variables.some((v) => /slow/i.test(v.name)) && variables.some((v) => /fast/i.test(v.name))) {
+    return `- Slow pointer: turtle-like slower marker
+- Fast pointer: rabbit-like quicker marker
+- Both must be visibly different by icon + label + color
+- Movement should show different pacing clearly`;
+  }
+
+  if (safe(analysis.category).toLowerCase().includes("two pointer")) {
+    return `- LEFT pointer should feel distinct and directional
+- RIGHT pointer should feel distinct and directional
+- Meeting or crossing should create a small spark or convergence emphasis
+- Labels must remain visible: left / right or variable names`;
+  }
+
+  return `- Pointers should never be represented by color alone
+- Use arrows, beams, markers, labels, or character focus indicators
+- Movement must be smooth and visible
+- If multiple markers exist, stack them vertically or offset them safely`;
+}
+
+function buildSplitMergeRules(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const name = safe(analysis.algorithmName).toLowerCase();
+  const category = safe(analysis.category).toLowerCase();
+
+  if (name.includes("merge sort") || category.includes("divide")) {
+    return `- SPLIT: crack / separate / drift apart with visible structure
+- MERGE: winning elements travel into a resolved center lane
+- Parent-child relation between split levels should remain readable`;
+  }
+
+  if (name.includes("quick sort") || name.includes("partition")) {
+    return `- Pivot must visibly stand out
+- Partition boundary should move physically through the structure
+- Lesser and greater groups separate with directionality`;
+  }
+
+  return "Not applicable — if the algorithm has no split / merge / partition phase, keep this section as a no-op.";
+}
+
+function inferAlgorithmPersonality(analysis: AnalysisResult): {
+  name: string;
+  behavior: string;
+  background: string;
+  typography: string;
+  motionStyle: string;
+  emotion: string;
+} {
+  const category = safe(analysis.category).toLowerCase();
+  const name = safe(analysis.algorithmName).toLowerCase();
+
+  if (name.includes("bubble sort")) {
+    return {
+      name: "Gentle & Patient",
+      behavior: "careful, repetitive, soothing, physically settling",
+      background: "cool underwater laboratory with calm motion",
+      typography: "rounded modern display font feel",
+      motionStyle: "soft floating motion with curved swaps",
+      emotion: "satisfying gradual order emerging from chaos",
+    };
+  }
+
+  if (name.includes("quick sort")) {
+    return {
+      name: "Aggressive & Decisive",
+      behavior: "sharp, fast, surgical, confident",
+      background: "high-contrast dramatic workspace",
+      typography: "clean angular headline style",
+      motionStyle: "snappy movement with strong pivots and cuts",
+      emotion: "speed, clarity, decisive tension",
+    };
+  }
+
+  if (name.includes("merge sort")) {
+    return {
+      name: "Organized & Methodical",
+      behavior: "precise, balanced, layered, constructive",
+      background: "cool structured environment with neat levels",
+      typography: "clean technical sans-serif / modern mono hybrid",
+      motionStyle: "measured splits and satisfying merges",
+      emotion: "calm confidence and structured progress",
+    };
+  }
+
+  if (name.includes("binary search")) {
+    return {
+      name: "Detective Efficient",
+      behavior: "narrowing, focused, intelligent, economical",
+      background: "noir investigation room with spotlight",
+      typography: "sharp headline + readable body text",
+      motionStyle: "tight range reduction and confident focus shifts",
+      emotion: "aha-moment efficiency",
+    };
+  }
+
+  if (category.includes("graph")) {
+    return {
+      name: "Explorer / Navigator",
+      behavior: "outward scanning, route discovery, strategic exploration",
+      background: "glowing map or route network",
+      typography: "clean technical map-like display",
+      motionStyle: "path tracing, pulses, route highlights",
+      emotion: "discovery and orientation",
+    };
+  }
+
+  if (category.includes("dp")) {
+    return {
+      name: "Puzzle Builder",
+      behavior: "incremental, thoughtful, memory-driven",
+      background: "grid workshop / blueprint table",
+      typography: "structured geometric sans",
+      motionStyle: "cell fills, dependency glows, optimal reconstruction",
+      emotion: "clarity emerging from many small decisions",
+    };
+  }
+
+  if (category.includes("backtracking")) {
+    return {
+      name: "Cautious Detective",
+      behavior: "try, test, retreat, refine",
+      background: "maze / branching mystery environment",
+      typography: "focused readable display with a dramatic edge",
+      motionStyle: "advance, pause, backtrack",
+      emotion: "tension, trial, and satisfying resolution",
+    };
+  }
+
+  return {
+    name: "Focused Problem Solver",
+    behavior: "educational, deliberate, strategy-revealing",
+    background: "cinematic dark data studio",
+    typography: "clean modern sans-serif",
+    motionStyle: "clear guided motion with calm readability",
+    emotion: "understanding through visible cause and effect",
   };
-
-  return hints[category] || `CREATIVITY HINTS FOR ${category.toUpperCase()}:
-Think: What does this algorithm PHYSICALLY do in the real world?
-What character would naturally perform this task?
-What environment would make this feel cinematic?
-What would make a 5-year-old immediately understand what's happening?
-Be specific, vivid, and unexpected — avoid generic visualizations.`;
 }
 
-// ═══════════════════════════════════════════════════
-// CATEGORY RULES (kept for backwards compat)
-// ═══════════════════════════════════════════════════
+function getCategorySpecificRules(
+  analysis: AnalysisResult
+): string {
+  const category = safe(analysis.category).toLowerCase();
+  const name = safe(analysis.algorithmName).toLowerCase();
 
-export function getCategoryRules(category: string): string {
-  const rules: Record<string, string> = {
-    Sorting:             'bars height∝value, parabolic arc swaps, green wave on sorted portion',
-    "Divide & Conquer":  'split animation, each level own row, merge zipper style',
-    Graph:               'circle nodes with glow, SVG edges, BFS=ripple DFS=torch trail',
-    "Binary Search":     'eliminated half tilts+fades, active range brackets shrink',
-    Tree:                'hierarchical nodes, traversal cursor, edge pulse',
-    DP:                  'grid cells fill with glow+ripple, dependency arrows, gold path',
-    "Two Pointers":      'L=green▶ R=red◀, smooth converge, meeting=spark',
-    Stack:               'vertical pile, push=slide+bounce, pop=lift+fly',
-    Queue:               'horizontal line, enqueue=slide right, dequeue=slide left',
-    Recursion:           'call stack cards, depth colors, call=card in, return=card out',
-    Greedy:              'chosen=golden glow+scale, rejected=gray fade',
-    Backtracking:        'forward=cautious, dead end=red+shake+retreat, solution=green path',
-  };
+  if (category.includes("sorting")) {
+    return `KNOWN MATCH: SORTING
+- comparisons must feel physical and visible
+- swaps must use actual motion, not instant teleportation
+- sorted region should visually calm down after each resolved pass
+- comparison counters should feel alive`;
+  }
 
-  return rules[category] ||
-    `Design unique visuals that make "${category}" immediately recognizable`;
+  if (name.includes("merge sort")) {
+    return `KNOWN MATCH: MERGE SORT
+- split into visible subgroups or levels
+- preserve parent-child relation between layers
+- merge should visibly choose the next winning value
+- final merge should feel deeply satisfying`;
+  }
+
+  if (category.includes("graph")) {
+    return `KNOWN MATCH: GRAPH / PATH
+- nodes must feel like places or checkpoints
+- edges must feel traversable
+- visited/unvisited difference must be obvious
+- route discovery must feel directional and accumulative`;
+  }
+
+  if (category.includes("binary search")) {
+    return `KNOWN MATCH: BINARY SEARCH
+- active range must shrink visually
+- eliminated half must leave the scene or clearly dim out
+- middle element must become the dramatic focus each iteration`;
+  }
+
+  if (category.includes("tree")) {
+    return `KNOWN MATCH: TREE
+- preserve hierarchy and parent-child readability
+- traversal must light connected branches
+- branch depth should feel meaningful`;
+  }
+
+  if (category.includes("dp")) {
+    return `KNOWN MATCH: DYNAMIC PROGRAMMING
+- cells must fill based on dependency logic
+- previous state should visibly influence next state
+- final path / answer should be reconstructed or highlighted cleanly`;
+  }
+
+  if (category.includes("two pointer")) {
+    return `KNOWN MATCH: TWO POINTERS
+- left and right markers must remain distinct
+- convergence should create anticipation
+- decisions must feel like narrowing a valid window or scanning a boundary`;
+  }
+
+  if (category.includes("stack") || category.includes("queue")) {
+    return `KNOWN MATCH: STACK / QUEUE
+- push/pop or enqueue/dequeue must feel physically ordered
+- top/front/rear identity must always remain readable
+- operation log should reinforce sequence meaning`;
+  }
+
+  if (category.includes("recursion") || category.includes("backtracking")) {
+    return `KNOWN MATCH: RECURSION / BACKTRACKING
+- recursive depth or branching should be visible
+- call and return must be separate visual events
+- failure paths must retreat cleanly instead of disappearing ambiguously`;
+  }
+
+  return `UNKNOWN / CUSTOM MATCH
+- infer physical meaning from algorithm behavior
+- choose one clear metaphor and commit to it
+- make the visuals educational first and decorative second
+- the viewer should still understand the strategy by watching`;
 }
+
+function buildOperationMapping(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const actions = Array.from(new Set(getSteps(analysis).map((step) => step.action)));
+
+  return actions
+    .map((action) => `- ${action} → ${inferSceneMeaningForAction(action, analysis, creativeDirection)}`)
+    .join("\n");
+}
+
+function buildBackgroundGuidance(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  return `Use "${safe(
+    creativeDirection.sceneName
+  )}" as the real scene, not just a flat dark panel. Base environment: ${safe(
+    creativeDirection.environment.setting
+  )}`;
+}
+
+function buildParticleGuidance(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  if (creativeDirection.domainAnimations.length > 0) {
+    return creativeDirection.domainAnimations
+      .map((item) => `- ${item}`)
+      .join("\n");
+  }
+
+  return "- use subtle particles only around meaningful interactions";
+}
+
+function buildAlgorithmDialogue(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string[] {
+  const name = safe(analysis.algorithmName).toLowerCase();
+
+  if (name.includes("rain")) {
+    return [
+      "The shorter wall decides how much water can stay here.",
+      "This basin can finally hold rain now.",
+      "A stronger boundary means more water can be trapped safely.",
+      "The skyline is starting to reveal its hidden pools.",
+    ];
+  }
+
+  if (name.includes("frog")) {
+    return [
+      "That jump costs less energy — smart move!",
+      "I only need the best path to this stone, not every path.",
+      "A longer jump might save effort here.",
+      "Almost there — one more good landing!",
+    ];
+  }
+
+  if (name.includes("bubble")) {
+    return [
+      "These two are out of order — let them trade places.",
+      "The biggest one is drifting toward where it belongs.",
+      "Bit by bit, the chaos is calming down.",
+      "Now the whole stream feels settled.",
+    ];
+  }
+
+  return [
+    "Let's focus on the most important change first.",
+    "This decision reveals the algorithm's strategy.",
+    "The pattern is becoming clearer now.",
+    "We are close to the final resolved state.",
+  ];
+}
+
+function buildRecursionPanelRules(analysis: AnalysisResult): string {
+  const template = inferTemplateType(analysis);
+  const category = safe(analysis.category).toLowerCase();
+
+  if (template === "recursion" || category.includes("recursion") || category.includes("backtracking")) {
+    return `- Show a right-side call stack / path stack panel
+- Each call / branch should appear as a visible card
+- Returns or backtracks must be separate visual events
+- Active depth should be brightest`;
+  }
+
+  return "No dedicated recursion panel required; use sidebar for current variables and state summary.";
+}
+
+function inferNaturalPhaseTransitions(analysis: AnalysisResult): string {
+  const category = safe(analysis.category).toLowerCase();
+  const name = safe(analysis.algorithmName).toLowerCase();
+
+  if (name.includes("merge sort")) return "Split → Recursive Solve → Merge";
+  if (name.includes("quick sort")) return "Choose Pivot → Partition → Recurse";
+  if (name.includes("rain")) return "Initialize Boundaries → Scan → Accumulate Water → Finish";
+  if (name.includes("frog")) return "Setup Stones → Evaluate Jumps → Improve Costs → Reach Goal";
+  if (category.includes("graph")) return "Initialize Frontier → Explore → Update Best State → Finish";
+  if (category.includes("dp")) return "Initialize Base Cases → Fill States → Resolve Answer";
+  return "Initialize → Process → Resolve Result";
+}
+
+function inferDomain(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const name = safe(analysis.algorithmName).toLowerCase();
+  const category = safe(analysis.category).toLowerCase();
+  const metaphor = safe(creativeDirection.metaphor).toLowerCase();
+
+  if (name.includes("rain") || metaphor.includes("water") || metaphor.includes("storm")) {
+    return "Water / Fluid";
+  }
+
+  if (name.includes("frog") || metaphor.includes("jump") || metaphor.includes("stones")) {
+    return "Traversal / Physical Movement";
+  }
+
+  if (category.includes("sorting")) {
+    return "Sorting / Settling / Reordering";
+  }
+
+  if (category.includes("graph")) {
+    return "Path / Navigation";
+  }
+
+  if (category.includes("tree")) {
+    return "Hierarchy / Branching";
+  }
+
+  if (category.includes("dp")) {
+    return "Puzzle / Accumulation";
+  }
+
+  if (category.includes("stack") || category.includes("queue")) {
+    return "Stacking / Waiting Line";
+  }
+
+  if (category.includes("binary search")) {
+    return "Search / Elimination";
+  }
+
+  return "Abstract problem-specific physical analogy";
+}
+
+function buildDomainPhysics(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const domain = inferDomain(analysis, creativeDirection);
+
+  switch (domain) {
+    case "Water / Fluid":
+      return `- water should rise smoothly, not snap
+- ripples and splashes should appear when new volume is captured
+- rain or moisture can reinforce the atmosphere
+- surfaces should feel fluid and layered`;
+
+    case "Traversal / Physical Movement":
+      return `- movement should feel like actual travel between positions
+- landings should produce impact feedback
+- route decisions should show direction clearly
+- the hero's body language should support the algorithm's logic`;
+
+    case "Sorting / Settling / Reordering":
+      return `- heavier values should feel heavier during swaps
+- settled regions should calm down physically
+- comparisons should create visible tension before resolution
+- repeated passes should feel like disorder gradually disappearing`;
+
+    case "Path / Navigation":
+      return `- traversal should move along visible routes
+- frontier updates should pulse outward
+- better paths should visibly replace weaker ones
+- destination clarity should improve over time`;
+
+    case "Hierarchy / Branching":
+      return `- depth should feel spatial
+- parent-child motion should follow branches
+- traversal should activate connected paths in sequence
+- deletions or backtracks should retreat up the hierarchy`;
+
+    case "Puzzle / Accumulation":
+      return `- new state should visibly build on previous state
+- cells should fill with cause-and-effect logic
+- solution reconstruction should travel backward through meaningful dependencies
+- progress should feel cumulative`;
+
+    case "Stacking / Waiting Line":
+      return `- push/pop or enqueue/dequeue must respect order
+- collisions and landings should feel physical
+- top/front identity should stay obvious
+- state changes should preserve queue / stack semantics`;
+
+    case "Search / Elimination":
+      return `- candidate narrowing should feel spatially smaller
+- rejections should leave the focus area
+- key checks should feel like an investigative spotlight
+- found state should create a crisp payoff`;
+
+    default:
+      return `- infer one coherent physical behavior and stay consistent
+- movement must always explain logic
+- scene reactions should support educational clarity`;
+  }
+}
+
+function inferMaterialSystem(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const name = safe(analysis.algorithmName).toLowerCase();
+  const domain = inferDomain(analysis, creativeDirection);
+
+  if (name.includes("rain")) {
+    return `- Buildings: wet concrete / glass with reflective highlights
+- Water: translucent layered blue fill with soft surface shimmer
+- Markers: neon survey beacons
+- Ground accents: puddles and drainage reflections`;
+  }
+
+  if (name.includes("frog")) {
+    return `- Stones / lily pads: soft natural textured surfaces
+- Water: moonlit reflective pond surface
+- Hero: expressive frog silhouette with readable body posture
+- Goal marker: warm glowing destination object`;
+  }
+
+  if (name.includes("bubble")) {
+    return `- Main objects: translucent bubble-like capsules with watery highlights
+- Background: soft underwater gradients and caustic lighting
+- Active glow: smooth underwater bloom rather than harsh neon`;
+  }
+
+  if (domain === "Path / Navigation") {
+    return `- Nodes: polished map pins / glowing checkpoints
+- Edges: route lines, roads, or energy paths
+- Background: subtle map grid / radar style`;
+  }
+
+  return `- Main objects should have themed material consistent with "${safe(
+    creativeDirection.sceneName
+  )}"
+- Use gradients, shadows, highlights, and translucency carefully
+- Avoid plain flat gray rectangles unless the metaphor demands them`;
+}
+
+function buildAmbientParticles(
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection
+): string {
+  const name = safe(analysis.algorithmName).toLowerCase();
+
+  if (name.includes("rain")) {
+    return `- rain streaks
+- mist specks
+- tiny splash droplets on capture
+- calm settling droplets on completion`;
+  }
+
+  if (name.includes("frog")) {
+    return `- fireflies
+- tiny ripple rings
+- soft sparkle trail on jumps
+- quiet pond shimmer at completion`;
+  }
+
+  if (name.includes("bubble")) {
+    return `- rising micro-bubbles
+- underwater dust motes
+- soft current particles
+- calm sparkle wave on completion`;
+  }
+
+  return creativeDirection.environment.ambientEffects
+    .map((item) => `- ${item}`)
+    .join("\n");
+}
+
+function inferVisualChangeForAction(
+  action: string,
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection,
+  step: NormalizedStep
+): string {
+  const lower = action.toLowerCase();
+  const scene = safe(creativeDirection.sceneName);
+
+  if (lower.includes("initialize")) {
+    return `The ${scene} scene builds in, the main structure appears, and the hero character enters in a readable starting position.`;
+  }
+
+  if (lower.includes("compare")) {
+    return `The active objects receive a focused spotlight, comparison emphasis, and a short tension pause before the decision resolves.`;
+  }
+
+  if (lower.includes("swap")) {
+    return `The two active objects cross in a visible arc-based motion with clear before/after identity.`;
+  }
+
+  if (lower.includes("update")) {
+    return `The changed value glows, updates visibly, and settles into its new state with a brief result pulse.`;
+  }
+
+  if (lower.includes("push") || lower.includes("enqueue")) {
+    return `A new object physically enters the auxiliary structure and takes its rightful place with ordered motion.`;
+  }
+
+  if (lower.includes("pop") || lower.includes("dequeue")) {
+    return `The leading object exits the structure visibly, leaving the remaining order intact and readable.`;
+  }
+
+  if (lower.includes("visit")) {
+    return `The active target lights up clearly, and the surrounding scene acknowledges that it has been reached.`;
+  }
+
+  if (lower.includes("return") || lower.includes("backtrack")) {
+    return `The current focus retreats or resolves, showing how control or state moves back to the previous context.`;
+  }
+
+  if (lower.includes("found")) {
+    return `The discovered result gets a high-clarity highlight, dramatic text, and a payoff moment.`;
+  }
+
+  if (lower.includes("complete")) {
+    return `The full scene settles into its final resolved arrangement with completion emphasis and calm closure.`;
+  }
+
+  return `The active region changes visibly in a way that supports the educational meaning of the step.`;
+}
+
+function inferSceneMeaningForAction(
+  action: string,
+  analysis: AnalysisResult,
+  creativeDirection: CreativeDirection,
+  step?: NormalizedStep
+): string {
+  const lower = action.toLowerCase();
+  const metaphor = safe(creativeDirection.metaphor);
+
+  if (lower.includes("initialize")) {
+    return `The world is being set up so the viewer understands the problem before the algorithm starts acting.`;
+  }
+
+  if (lower.includes("compare")) {
+    return `The algorithm is evaluating which choice makes sense next within the metaphor: ${metaphor}`;
+  }
+
+  if (lower.includes("swap")) {
+    return `Two scene objects are changing relative order or position to move the system closer to the correct arrangement.`;
+  }
+
+  if (lower.includes("update")) {
+    return `A new best-known state, count, boundary, or value is being recorded in the world.`;
+  }
+
+  if (lower.includes("push") || lower.includes("enqueue")) {
+    return `Something important is being stored or queued for later processing.`;
+  }
+
+  if (lower.includes("pop") || lower.includes("dequeue")) {
+    return `The next waiting item is now ready to act or be resolved.`;
+  }
+
+  if (lower.includes("visit")) {
+    return `The algorithm has reached a new meaningful location or state.`;
+  }
+
+  if (lower.includes("return")) {
+    return `The algorithm is sending a computed result back to an earlier context.`;
+  }
+
+  if (lower.includes("backtrack")) {
+    return `This path did not work, so the algorithm is retreating and trying a better option.`;
+  }
+
+  if (lower.includes("found")) {
+    return `The desired answer has been identified inside the scene.`;
+  }
+
+  if (lower.includes("complete")) {
+    return `The world reaches its final solved state.`;
+  }
+
+  return `This step advances the scene toward the final answer in a way consistent with the metaphor.`;
+}
+
+function inferWhyThisMatters(
+  action: string,
+  analysis: AnalysisResult,
+  step: NormalizedStep
+): string {
+  const lower = action.toLowerCase();
+
+  if (lower.includes("initialize")) {
+    return "A good setup gives the viewer the mental model needed for the rest of the algorithm.";
+  }
+
+  if (lower.includes("compare")) {
+    return "The algorithm's core logic is usually revealed through how it compares candidates.";
+  }
+
+  if (lower.includes("swap")) {
+    return "This physically changes the state and moves the structure closer to the correct answer.";
+  }
+
+  if (lower.includes("update")) {
+    return "A remembered value or better state often drives all future decisions.";
+  }
+
+  if (lower.includes("push") || lower.includes("enqueue")) {
+    return "Storing work in the right order is essential to the algorithm's correctness.";
+  }
+
+  if (lower.includes("pop") || lower.includes("dequeue")) {
+    return "Removing the next item reveals the processing discipline of the algorithm.";
+  }
+
+  if (lower.includes("visit")) {
+    return "This marks progress into a new part of the search or structure.";
+  }
+
+  if (lower.includes("return") || lower.includes("backtrack")) {
+    return "This shows how the algorithm reuses solved sub-results or abandons a bad path.";
+  }
+
+  if (lower.includes("found")) {
+    return "This is the payoff where the search or construction succeeds.";
+  }
+
+  if (lower.includes("complete")) {
+    return "The final state confirms the strategy worked from start to finish.";
+  }
+
+  if (step.important) {
+    return `This is a highlighted learning moment tied to the key insight: ${safe(
+      analysis.keyInsight
+    )}`;
+  }
+
+  return "This step contributes to the algorithm's gradual progress and should remain readable.";
+}
+
