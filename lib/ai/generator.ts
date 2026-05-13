@@ -165,6 +165,22 @@ function hasMinimumContent(html: string): boolean {
   const scriptMatch = html.match(/<script[^>]*>([\s\S]*?)<\/script>/i);
   if (!scriptMatch || scriptMatch[1].trim().length < 100) return false;
 
+  // Must define steps
+  const hasWindowSteps =
+    html.includes("window.STEPS") ||
+    html.includes("const STEPS") ||
+    html.includes("let STEPS");
+
+  if (!hasWindowSteps) return false;
+
+  // Must include renderStep
+  const hasRenderStep =
+    html.includes("function renderStep") ||
+    html.includes("const renderStep") ||
+    html.includes("let renderStep");
+
+  if (!hasRenderStep) return false;
+
   return true;
 }
 
@@ -179,12 +195,31 @@ function validateHTML(html: string): {
   const truncated = isTruncated(html);
   const hasContent = hasMinimumContent(html);
 
+  const hasWindowSteps =
+    html.includes("window.STEPS") ||
+    html.includes("const STEPS") ||
+    html.includes("let STEPS");
+
+  const hasRenderStep =
+    html.includes("function renderStep") ||
+    html.includes("const renderStep") ||
+    html.includes("let renderStep");
+
+  const hasControls =
+    html.toLowerCase().includes("play") &&
+    html.toLowerCase().includes("pause") &&
+    html.toLowerCase().includes("next") &&
+    html.toLowerCase().includes("prev");
+
   if (!complete) issues.push("HTML structure incomplete");
   if (truncated) issues.push("HTML appears truncated");
   if (!hasContent) issues.push("HTML has insufficient content");
+  if (!hasWindowSteps) issues.push("Missing STEPS array");
+  if (!hasRenderStep) issues.push("Missing renderStep function");
+  if (!hasControls) issues.push("Missing playback controls");
 
   return {
-    valid: hasContent,
+    valid: hasContent && hasWindowSteps && hasRenderStep,
     complete,
     truncated,
     issues,

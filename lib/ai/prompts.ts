@@ -872,12 +872,27 @@ Required Output Rules:
 - Output ONLY one full HTML document
 - Use Vanilla HTML/CSS/JS
 - Must work in iframe srcdoc
-- MUST include const STEPS = [...] array with ALL ${getSteps(analysis).length} steps
-- Each step MUST have: step, action, caption, variables, highlight, important, timingMult
-- MUST include renderStep(index) function that updates visuals per step
-- MUST include playback controls: Reset, Prev, Play/Pause, Next, Speed
-- MUST show step counter as "X / Y" format (never show 0 / 0)
-- MUST show caption with proper spaces between words
+- MUST define a global steps array exactly like this:
+  window.STEPS = [
+    {
+      step: 1,
+      action: "initialize",
+      caption: "Readable sentence here",
+      variables: {},
+      highlight: [],
+      important: true,
+      timingMult: 1.0
+    }
+  ];
+- window.STEPS MUST contain ALL ${steps.length} steps
+- window.STEPS MUST NOT be empty
+- If you use const STEPS = [...], then also assign window.STEPS = STEPS
+- MUST include a renderStep(index) function
+- renderStep(index) MUST read from window.STEPS[index]
+- MUST include working playback controls: Reset, Prev, Play/Pause, Next, Speed
+- MUST show step counter as "X / Y" format and use window.STEPS.length as Y
+- MUST show caption from step.caption on every step
+- MUST preserve spaces in captions
 - Play button must auto-advance through all steps with timing delays
 - Include stats bar, caption bar, right sidebar
 - No markdown
