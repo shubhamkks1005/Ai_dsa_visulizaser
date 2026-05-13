@@ -229,6 +229,7 @@ STRICT RULES
     - No comments
     - No single quotes for JSON strings
     - Return one valid parseable JSON object only
+     - IMPORTANT: Keep spaces between words (e.g., "The frog jumps" NOT "Thefrogjumps")
 `.trim();
 }
 // ═══════════════════════════════════════════════════
@@ -1042,6 +1043,9 @@ async function callGeminiOnce(
       temperature: 0.25,
       responseMimeType: "application/json",
       maxOutputTokens: MAX_OUTPUT_TOKENS,
+      thinkingConfig: {
+        thinkingBudget: 0,
+      },
     },
   });
 

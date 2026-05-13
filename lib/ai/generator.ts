@@ -251,14 +251,17 @@ async function repairHTML(
 
         const client = new GoogleGenAI({ apiKey: key });
 
-        const response = await client.models.generateContent({
-          model,
-          contents: repairPrompt,
-          config: {
-            temperature: 0.1,
-            maxOutputTokens: MAX_REPAIR_TOKENS,
-          },
-        });
+       const response = await client.models.generateContent({
+  model,
+  contents: prompt,
+  config: {
+    temperature: 0.3,
+    maxOutputTokens: MAX_OUTPUT_TOKENS,
+    thinkingConfig: {
+      thinkingBudget: 0,
+    },
+  },
+});
 
         const completionText = response.text;
 
