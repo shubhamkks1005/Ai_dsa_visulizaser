@@ -1,271 +1,481 @@
-import Anthropic from "@anthropic-ai/sdk";
+// lib/ai/generator.ts
+
 import OpenAI from "openai";
 import Groq from "groq-sdk";
-import { GoogleGenAI } from "@google/genai";
-import { AnalysisResult } from "@/types";
+import { AnalysisResult, CreativeScene, TechnicalSpec } from "@/types";
+import { AIVisualizationOutput, TemplateType } from "@/lib/visualizer/assembler";
 import {
-  buildVisualizationPrompt,
-  buildShortVisualizationPrompt,
-} from "@/lib/ai/prompts";
+  runModelChain,
+  getOpenRouterKey,
+  getGroqKey,
+  MODELS,
+  OPENROUTER_HEADERS,
+  type ModelFn,
+} from "@/lib/ai/ai-utils";
 
-// ═══════════════════════════════════════
-// HELPER: Extract HTML
-// ═══════════════════════════════════════
+export type { CreativeScene, TechnicalSpec };
 
-function extractHTML(text: string): string {
-  const htmlMatch = text.match(/```(?:html)?\s*([\s\S]*?)```/);
-  if (htmlMatch) return htmlMatch[1].trim();
+// ═══════════════════════════════════════════════════
+// JSON PARSER
+// ═══════════════════════════════════════════════════
 
-  const trimmed = text.trim();
-  if (
-    trimmed.startsWith("<!DOCTYPE") ||
-    trimmed.startsWith("<html") ||
-    trimmed.startsWith("<HTML")
-  )
-    return trimmed;
-
-  const docTypeMatch = trimmed.match(/(<!DOCTYPE[\s\S]*<\/html>)/i);
-  if (docTypeMatch) return docTypeMatch[1].trim();
-
-  return trimmed;
-}
-
-function validateHTML(html: string): boolean {
-  if (!html || html.length < 200) return false;
-  if (!html.includes("<html") && !html.includes("<!DOCTYPE")) return false;
-  if (!html.includes("<script")) return false;
-  if (!html.includes("<style")) return false;
-  return true;
-}
-
-// ═══════════════════════════════════════
-// 1. Claude 3.5 Sonnet (BEST)
-// ═══════════════════════════════════════
-
-async function generateWithClaude(analysis: AnalysisResult): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY not set");
-
-  const anthropic = new Anthropic({ apiKey });
-  const prompt = buildVisualizationPrompt(analysis);
-
-  const message = await anthropic.messages.create({
-    model: "claude-3-5-sonnet-20241022",
-    max_tokens: 8192,
-    messages: [{ role: "user", content: prompt }],
-  });
-
-  const textBlock = message.content.find((block) => block.type === "text");
-  if (!textBlock || textBlock.type !== "text") {
-    throw new Error("No text in Claude response");
+function parseAIOutput(text: string, modelName: string): AIVisualizationOutput {
+  if (!text || text.trim().length === 0) {
+    throw new Error(`Empty response from ${modelName}`);
   }
 
-  const html = extractHTML(textBlock.text);
-  if (!validateHTML(html)) throw new Error("Claude returned invalid HTML");
-  return html;
+  let clean = text.trim();
+
+  // Strip <think>...</think> blocks
+  clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+  // Strip markdown fences
+  clean = clean
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```\s*$/i, '')
+    .trim();
+
+  // Fix common JSON escaping issues from AI models
+  // Replace actual newlines inside string values with \\n
+  clean = fixJSONEscaping(clean);
+
+  // Direct parse
+  try {
+    return JSON.parse(clean) as AIVisualizationOutput;
+  } catch {
+    // Extract first { to last }
+    const start = clean.indexOf('{');
+    const end   = clean.lastIndexOf('}');
+    if (start !== -1 && end !== -1 && end > start) {
+      try {
+        return JSON.parse(clean.slice(start, end + 1)) as AIVisualizationOutput;
+      } catch (e) {
+        throw new Error(
+          `Failed to parse ${modelName} output JSON: ${e instanceof Error ? e.message : String(e)}`
+        );
+      }
+    }
+    throw new Error(`No valid JSON object found in ${modelName} response`);
+  }
 }
 
-// ═══════════════════════════════════════
-// 2. OpenRouter — Multiple Free Models
-// ═══════════════════════════════════════
+/**
+ * fixJSONEscaping(text)
+ * Fixes common JSON escaping issues from AI models.
+ * AI often puts real newlines/tabs inside JSON string values
+ * which breaks JSON.parse.
+ */
+function fixJSONEscaping(text: string): string {
+  // Strategy: Find string values and escape unescaped control chars
+  // This is tricky — we do a simple approach:
+  // Replace literal \n \t \r inside JSON string values
 
-async function generateWithOpenRouter(
-  analysis: AnalysisResult
-): Promise<string> {
-  const apiKey = process.env.OPENROUTER_API_KEY;
-  if (!apiKey) throw new Error("OPENROUTER_API_KEY not set");
+  try {
+    // Try parsing first — if it works, no fix needed
+    JSON.parse(text);
+    return text;
+  } catch {
+    // Fix: replace unescaped newlines inside string values
+    // We do this by processing character by character
+    let result   = '';
+    let inString = false;
+    let escaped  = false;
 
-  const client = new OpenAI({
-    baseURL: "https://openrouter.ai/api/v1",
-    apiKey: apiKey,
-  });
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
 
-  const prompt = buildVisualizationPrompt(analysis);
-
-  const models = [
-    "deepseek/deepseek-chat:free",
-    "deepseek/deepseek-r1:free",
-    "meta-llama/llama-3.1-8b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-  ];
-
-  let lastError: Error | null = null;
-
-  for (const modelName of models) {
-    try {
-      console.log(`[Generator] Trying OpenRouter model: ${modelName}...`);
-
-      const completion = await client.chat.completions.create({
-        model: modelName,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are an expert frontend visualization architect. Generate production-quality, single-file, self-contained HTML visualizations with beautiful animations. Output ONLY valid complete HTML starting with <!DOCTYPE html>. No markdown fences. No explanations.",
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        max_tokens: 8192,
-      });
-
-      const text = completion.choices[0]?.message?.content;
-      if (!text) throw new Error("Empty response");
-
-      const html = extractHTML(text);
-      if (!validateHTML(html)) {
-        throw new Error(`${modelName} returned invalid HTML`);
+      if (escaped) {
+        result  += ch;
+        escaped  = false;
+        continue;
       }
 
-      console.log(`[Generator] ✅ OpenRouter ${modelName} succeeded`);
-      return html;
-    } catch (error) {
-      console.log(`[Generator] ❌ OpenRouter ${modelName} failed`);
-      lastError =
-        error instanceof Error ? error : new Error(String(error));
+      if (ch === '\\') {
+        escaped = true;
+        result += ch;
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = !inString;
+        result  += ch;
+        continue;
+      }
+
+      if (inString) {
+        // Replace problematic control characters
+        if (ch === '\n')      { result += '\\n';  continue; }
+        if (ch === '\r')      { result += '\\r';  continue; }
+        if (ch === '\t')      { result += '\\t';  continue; }
+        // Replace other control chars
+        const code = ch.charCodeAt(0);
+        if (code < 32 && code !== 10 && code !== 13 && code !== 9) {
+          result += '\\u' + code.toString(16).padStart(4, '0');
+          continue;
+        }
+      }
+
+      result += ch;
+    }
+
+    return result;
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// VALIDATOR
+// ═══════════════════════════════════════════════════
+
+function validateAIOutput(output: AIVisualizationOutput, modelName: string): string[] {
+  const issues: string[] = [];
+
+  if (!output) {
+    issues.push('Output is null/undefined');
+    return issues;
+  }
+
+  const validTemplates = ['array','graph','tree','dp','stackqueue','recursion'];
+  if (!output.templateType || !validTemplates.includes(output.templateType)) {
+    issues.push(`Invalid templateType: "${output.templateType}"`);
+  }
+
+  if (!output.sceneScript || output.sceneScript.trim().length < 100) {
+    issues.push('Missing or too-short sceneScript');
+  } else {
+    if (!output.sceneScript.includes('window.STEPS') &&
+        !output.sceneScript.includes('STEPS')) {
+      issues.push('sceneScript missing STEPS definition');
+    }
+    if (!output.sceneScript.includes('renderScene')) {
+      issues.push('sceneScript missing renderScene function');
+    }
+    if (!output.sceneScript.includes('initVisualization')) {
+      issues.push('sceneScript missing initVisualization call');
     }
   }
 
-  throw lastError || new Error("All OpenRouter models failed");
-}
-
-// ═══════════════════════════════════════
-// 3. Google Gemini (New SDK)
-// ═══════════════════════════════════════
-
-async function generateWithGemini(
-  analysis: AnalysisResult
-): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY not set");
-
-  const ai = new GoogleGenAI({ apiKey });
-
-  const models = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-pro",
-  ];
-
-  const prompt = buildVisualizationPrompt(analysis);
-  let lastError: Error | null = null;
-
-  for (const modelName of models) {
-    try {
-      console.log(`[Generator] Trying Gemini model: ${modelName}...`);
-
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: prompt,
-      });
-
-      const text = response.text;
-      if (!text) throw new Error("Empty response");
-
-      const html = extractHTML(text);
-      if (!validateHTML(html)) {
-        throw new Error(`${modelName} returned invalid HTML`);
-      }
-
-      console.log(`[Generator] ✅ Gemini ${modelName} succeeded`);
-      return html;
-    } catch (error) {
-      console.log(`[Generator] ❌ Gemini ${modelName} failed`);
-      lastError =
-        error instanceof Error ? error : new Error(String(error));
-    }
+  if (!output.customCSS || output.customCSS.trim().length < 10) {
+    issues.push('Missing or empty customCSS');
   }
 
-  throw lastError || new Error("All Gemini models failed");
+  if (issues.length > 0) {
+    console.warn(`[Generator] ${modelName} output issues:`, issues);
+  }
+
+  return issues;
 }
 
-// ═══════════════════════════════════════
-// 4. Groq (SHORT prompt — last resort)
-// ═══════════════════════════════════════
+// ═══════════════════════════════════════════════════
+// NORMALIZER
+// ═══════════════════════════════════════════════════
 
-async function generateWithGroq(
-  analysis: AnalysisResult
-): Promise<string> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error("GROQ_API_KEY not set");
+function normalizeAIOutput(
+  output:        AIVisualizationOutput,
+  analysis:      AnalysisResult,
+  technicalSpec: TechnicalSpec
+): AIVisualizationOutput {
 
-  const groq = new Groq({ apiKey });
-  const prompt = buildShortVisualizationPrompt(analysis);
+  // Fix templateType
+  const validTemplates: TemplateType[] = [
+    'array','graph','tree','dp','stackqueue','recursion'
+  ];
+  if (!validTemplates.includes(output.templateType as TemplateType)) {
+    output.templateType = (technicalSpec.templateType as TemplateType) || 'array';
+  }
+
+  // Fix missing fields
+  if (!output.sceneHTML)  output.sceneHTML  = '';
+  if (!output.customCSS) {
+    output.customCSS = `/* ${analysis.algorithmName} — minimal fallback styles */
+#scene-content { display: flex; align-items: center; justify-content: center; }`;
+  }
+
+  // Fix missing sceneConfig
+  if (!output.sceneConfig) {
+    output.sceneConfig = {
+      algorithmName:   analysis.algorithmName,
+      timeComplexity:  analysis.timeComplexity,
+      spaceComplexity: analysis.spaceComplexity || '',
+      stats: [
+        { key: 'comparisons', label: 'Comparisons', value: 0, side: 'left'  },
+        { key: 'swaps',       label: 'Swaps',       value: 0, side: 'left'  },
+        { key: 'currentStep', label: 'Step',        value: 0, side: 'right' },
+      ],
+      boldKeywords:  [],
+      baseInterval:  technicalSpec.baseInterval || 1200,
+    };
+  }
+
+  // Clean sceneScript
+  if (output.sceneScript) {
+    output.sceneScript = output.sceneScript
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/^```(?:javascript|js)?\s*/i, '')
+      .replace(/```\s*$/i, '')
+      .trim();
+  }
+
+  // Clean customCSS
+  if (output.customCSS) {
+    output.customCSS = output.customCSS
+      .replace(/^<style[^>]*>\s*/i, '')
+      .replace(/\s*<\/style>$/i, '')
+      .trim();
+  }
+
+  // Clean sceneHTML
+  if (output.sceneHTML) {
+    output.sceneHTML = output.sceneHTML
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+      .trim();
+  }
+
+  return output;
+}
+
+// ═══════════════════════════════════════════════════
+// SYSTEM PROMPT BUILDER
+// ═══════════════════════════════════════════════════
+
+function buildGeneratorSystemPrompt(): string {
+  return `You are an expert algorithm visualization coder.
+
+Your job is to generate the algorithm-specific parts of a visualization system.
+The base framework (shell, controls, animations, engines) is already built.
+You only generate the algorithm-specific JSON payload.
+
+CRITICAL OUTPUT RULES:
+1. Return ONLY a valid JSON object
+2. No text before the JSON
+3. No text after the JSON
+4. No markdown code fences
+5. No explanations
+6. No <think> tags in output
+7. The JSON must have exactly these fields:
+   - templateType (string)
+   - customCSS (string — all CSS as a single string, use \\n for newlines)
+   - sceneHTML (string — extra HTML elements as a single string)
+   - sceneScript (string — complete JavaScript as a single string, use \\n for newlines)
+   - sceneConfig (object)
+
+IMPORTANT for string fields:
+- customCSS, sceneHTML, sceneScript are STRING values in JSON
+- You MUST escape newlines as \\n inside these strings
+- You MUST escape quotes as \\" inside these strings
+- Do NOT put actual line breaks inside JSON string values`;
+}
+
+// ═══════════════════════════════════════════════════
+// CLIENT HELPERS
+// ═══════════════════════════════════════════════════
+
+function getOpenRouterClient(): OpenAI {
+  return new OpenAI({
+    baseURL: 'https://openrouter.ai/api/v1',
+    apiKey:  getOpenRouterKey(),
+    defaultHeaders: OPENROUTER_HEADERS,
+  });
+}
+
+function getGroqClient(): Groq {
+  return new Groq({ apiKey: getGroqKey() });
+}
+
+// ═══════════════════════════════════════════════════
+// GENERIC OPENROUTER GENERATOR CALLER
+// ═══════════════════════════════════════════════════
+
+async function callOpenRouterGenerator(
+  model:         string,
+  compactPrompt: string,
+  modelName:     string
+): Promise<AIVisualizationOutput> {
+  const client = getOpenRouterClient();
+
+  const completion = await client.chat.completions.create({
+    model,
+    messages: [
+      { role: 'system', content: buildGeneratorSystemPrompt() },
+      { role: 'user',   content: compactPrompt },
+    ],
+    max_tokens:  7500,
+    temperature: 0.2,
+  });
+
+  const text   = completion.choices[0]?.message?.content;
+  const output = parseAIOutput(text || '', modelName);
+
+  const issues = validateAIOutput(output, modelName);
+  if (issues.length > 2) {
+    throw new Error(`${modelName} output has ${issues.length} critical issues: ${issues.join(', ')}`);
+  }
+
+  return output;
+}
+
+// ═══════════════════════════════════════════════════
+// GROQ GENERATOR CALLER
+// ═══════════════════════════════════════════════════
+
+async function callGroqGenerator(
+  compactPrompt: string
+): Promise<AIVisualizationOutput> {
+  const groq = getGroqClient();
 
   const completion = await groq.chat.completions.create({
-    model: "llama-3.3-70b-versatile",
+    model: MODELS.groq.llama70B,
     messages: [
-      {
-        role: "system",
-        content:
-          "You are an expert frontend developer specializing in animated algorithm visualizations. Output ONLY complete self-contained HTML. No markdown. No explanation.",
-      },
-      {
-        role: "user",
-        content: prompt,
-      },
+      { role: 'system', content: buildGeneratorSystemPrompt() },
+      { role: 'user',   content: compactPrompt },
     ],
-    temperature: 0.5,
-    max_tokens: 6000,
+    temperature: 0.2,
+    max_tokens:  7500,
   });
 
-  const text = completion.choices[0]?.message?.content;
-  if (!text) throw new Error("Empty response from Groq");
+  const text   = completion.choices[0]?.message?.content;
+  const output = parseAIOutput(text || '', 'Groq Llama');
 
-  const html = extractHTML(text);
-  if (!validateHTML(html)) throw new Error("Groq returned invalid HTML");
-  return html;
+  const issues = validateAIOutput(output, 'Groq Llama');
+  if (issues.length > 2) {
+    throw new Error(`Groq output has ${issues.length} critical issues: ${issues.join(', ')}`);
+  }
+
+  return output;
 }
 
-// ═══════════════════════════════════════
-// MAIN EXPORT — Full Chain
-// ═══════════════════════════════════════
+// ═══════════════════════════════════════════════════
+// GENERATOR MODEL CHAIN BUILDER
+// ═══════════════════════════════════════════════════
 
+function buildGeneratorChain(compactPrompt: string): ModelFn<AIVisualizationOutput>[] {
+  return [
+    // 1. Qwen Coder (best free coding model)
+    {
+      name: 'Qwen Coder',
+      fn: () => callOpenRouterGenerator(
+        MODELS.openrouter.qwenCoder,
+        compactPrompt,
+        'Qwen Coder'
+      ),
+    },
+
+    // 2. GPT-OSS 120B (strong backup)
+    {
+      name: 'GPT-OSS 120B',
+      fn: () => callOpenRouterGenerator(
+        MODELS.openrouter.gptOSS120B,
+        compactPrompt,
+        'GPT-OSS 120B'
+      ),
+    },
+
+    // 3. Llama 3.3 Instruct (reliable fallback)
+    {
+      name: 'Llama 3.3 Instruct',
+      fn: () => callOpenRouterGenerator(
+        MODELS.openrouter.llama70BInstruct,
+        compactPrompt,
+        'Llama 3.3 Instruct'
+      ),
+    },
+
+    // 4. Groq Llama (last resort)
+    {
+      name: 'Groq Llama',
+      fn: () => callGroqGenerator(compactPrompt),
+    },
+  ];
+}
+
+// ═══════════════════════════════════════════════════
+// GENERATOR RETRY CONFIG
+// ═══════════════════════════════════════════════════
+
+const GENERATOR_RETRY_CONFIG = {
+  maxRetries:  2,
+  baseDelayMs: 2000,
+  maxDelayMs:  15000,
+  jitterMs:    500,
+};
+
+// ═══════════════════════════════════════════════════
+// MAIN EXPORT
+// ═══════════════════════════════════════════════════
+
+/**
+ * generateVisualization(compactPrompt, creativeScene, technicalSpec, analysis)
+ *
+ * Generates AIVisualizationOutput JSON using AI models.
+ * This output is then passed to assembler.ts to create final HTML.
+ *
+ * Model chain:
+ *   1. Qwen Coder         (OpenRouter) — best free coding model
+ *   2. GPT-OSS 120B       (OpenRouter) — strong fallback
+ *   3. Llama 3.3 Instruct (OpenRouter) — reliable fallback
+ *   4. Groq Llama 3.3 70B              — last resort
+ *
+ * @param compactPrompt  Token-safe prompt from combineCompactPrompt()
+ * @param creativeScene  Creative chunk from generatePrompt()
+ * @param technicalSpec  Technical chunk from generatePrompt()
+ * @param analysis       Full analysis result
+ * @returns              AIVisualizationOutput ready for assembler
+ */
 export async function generateVisualization(
-  analysis: AnalysisResult
-): Promise<string> {
-  // Try 1: Claude (Best)
-  try {
-    console.log("[Generator] Trying Claude 3.5 Sonnet...");
-    const result = await generateWithClaude(analysis);
-    console.log("[Generator] ✅ Claude succeeded");
-    return result;
-  } catch (error) {
-    console.error("[Generator] ❌ Claude failed:", error);
-  }
+  compactPrompt:  string,
+  creativeScene:  CreativeScene,
+  technicalSpec:  TechnicalSpec,
+  analysis:       AnalysisResult
+): Promise<AIVisualizationOutput> {
 
-  // Try 2: OpenRouter (Free, full prompt)
-  try {
-    console.log("[Generator] Trying OpenRouter...");
-    const result = await generateWithOpenRouter(analysis);
-    return result;
-  } catch (error) {
-    console.error("[Generator] ❌ All OpenRouter models failed:", error);
-  }
+  console.log('[Generator] Starting visualization generation...');
+  console.log('[Generator] Algorithm:', analysis.algorithmName);
+  console.log('[Generator] Template:', technicalSpec.templateType);
+  console.log('[Generator] Scene:', creativeScene.sceneName);
 
-  // Try 3: Gemini (Full prompt)
-  try {
-    console.log("[Generator] Trying Gemini...");
-    const result = await generateWithGemini(analysis);
-    return result;
-  } catch (error) {
-    console.error("[Generator] ❌ All Gemini models failed:", error);
-  }
+  // Build model chain
+  const chain = buildGeneratorChain(compactPrompt);
 
-  // Try 4: Groq (Short prompt, last resort)
-  try {
-    console.log("[Generator] Trying Groq Llama 3.3 70B...");
-    const result = await generateWithGroq(analysis);
-    console.log("[Generator] ✅ Groq succeeded");
-    return result;
-  } catch (error) {
-    console.error("[Generator] ❌ Groq failed:", error);
-  }
-
-  throw new Error(
-    "All generator models failed. Please check your API keys and try again."
+  // Run chain with backoff
+  const { result, model } = await runModelChain(
+    chain,
+    GENERATOR_RETRY_CONFIG,
+    'Generator'
   );
+
+  // Normalize output
+  const normalized = normalizeAIOutput(result, analysis, technicalSpec);
+
+  console.log(`[Generator] ✅ Generation complete via ${model}`);
+  console.log(`[Generator] Template: ${normalized.templateType}`);
+  console.log(`[Generator] CSS length: ${normalized.customCSS?.length ?? 0}`);
+  console.log(`[Generator] Script length: ${normalized.sceneScript?.length ?? 0}`);
+  console.log(`[Generator] HTML length: ${normalized.sceneHTML?.length ?? 0}`);
+
+  return normalized;
+}
+
+// ═══════════════════════════════════════════════════
+// LEGACY EXPORT (backwards compatibility)
+// ═══════════════════════════════════════════════════
+
+/**
+ * @deprecated Use generateVisualization() + assembleHTML() instead
+ */
+export async function generateHTML(
+  compactPrompt:  string,
+  creativeScene:  CreativeScene,
+  technicalSpec:  TechnicalSpec,
+  analysis:       AnalysisResult
+): Promise<string> {
+  const { assembleHTML } = await import('@/lib/visualizer/assembler');
+
+  const aiOutput = await generateVisualization(
+    compactPrompt,
+    creativeScene,
+    technicalSpec,
+    analysis
+  );
+
+  return assembleHTML(aiOutput, analysis);
 }
