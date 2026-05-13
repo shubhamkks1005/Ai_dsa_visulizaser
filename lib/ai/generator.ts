@@ -252,13 +252,13 @@ async function repairHTML(
         const client = new GoogleGenAI({ apiKey: key });
 
        const response = await client.models.generateContent({
-  model,
-  contents: prompt,
-  config: {
-    temperature: 0.3,
-    maxOutputTokens: MAX_OUTPUT_TOKENS,
-    thinkingConfig: {
-      thinkingBudget: 0,
+           model,
+           contents: String(prompt),
+           config: {
+          temperature: 0.3,
+           maxOutputTokens: MAX_OUTPUT_TOKENS,
+          thinkingConfig: {
+          thinkingBudget: 0,
     },
   },
 });
@@ -360,7 +360,7 @@ async function callGeminiGenerator(
 
   const response = await client.models.generateContent({
     model,
-    contents: prompt,
+    contents: String(prompt),
     config: {
       temperature: 0.3,
       maxOutputTokens: MAX_OUTPUT_TOKENS,
