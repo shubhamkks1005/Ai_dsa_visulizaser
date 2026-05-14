@@ -162,6 +162,13 @@ function useProgressSimulation() {
   };
 }
 
+const dotPulseKeyframes = `
+@keyframes dotPulse {
+  0%, 80%, 100% { transform: scale(0.6); opacity: 0.4; }
+  40% { transform: scale(1.1); opacity: 1; }
+}
+`;
+
 // ═══════════════════════════════════════════════════
 // MAIN PAGE COMPONENT
 // ═══════════════════════════════════════════════════
@@ -199,6 +206,28 @@ export default function VisualizerPage() {
     failProgress,
     resetProgress,
   } = useProgressSimulation();
+
+  // Cycling messages while generating
+const waitMessages = [
+  "✨ AI is thinking creatively…",
+  "🎨 Designing your scene…",
+  "🧠 Tracing each algorithm step…",
+  "⚙️ Wiring animations carefully…",
+  "🌊 Adding glow, motion and polish…",
+  "🎬 Almost ready, just a moment…",
+];
+const [waitMsgIndex, setWaitMsgIndex] = useState(0);
+
+useEffect(() => {
+  if (!isGenerating) {
+    setWaitMsgIndex(0);
+    return;
+  }
+  const t = setInterval(() => {
+    setWaitMsgIndex((i) => (i + 1) % waitMessages.length);
+  }, 2500);
+  return () => clearInterval(t);
+}, [isGenerating]);
 
   // Auth check
   useEffect(() => {
@@ -331,6 +360,8 @@ export default function VisualizerPage() {
     <main className="min-h-screen" style={{ background: "var(--bg-primary)" }}>
       <div className="grid-overlay" />
 
+      <style>{dotPulseKeyframes}</style>
+
       <div className="relative z-10 flex flex-col h-screen">
         {/* ═══════════════════════════════════════════
             TOP BAR
@@ -404,7 +435,7 @@ export default function VisualizerPage() {
         {/* ═══════════════════════════════════════════
             ALGORITHM INFO BAR
         ═══════════════════════════════════════════ */}
-        {result && (showPreview || showProgress) && (
+        {result && showProgress && (
           <div
             className="px-4 py-2 flex-shrink-0 animate-slide-up-fade"
             style={{ borderBottom: "1px solid var(--border)" }}
@@ -522,32 +553,37 @@ export default function VisualizerPage() {
               width: codeCollapsed ? "0px" : "27%",
               minWidth: codeCollapsed ? "0px" : "280px",
               maxWidth: codeCollapsed ? "0px" : "420px",
-              borderRight: codeCollapsed
-                ? "none"
-                : "1px solid var(--border)",
+              borderRight: codeCollapsed ? "none" : "1px solid var(--border)",
               opacity: codeCollapsed ? 0 : 1,
             }}
           >
-            {/* Code Editor */}
-            <div className="flex-1 overflow-hidden" style={{ minHeight: 0 }}>
-              <CodeEditor
-                code={code}
-                language={language}
-                onCodeChange={setCode}
-                onLanguageChange={setLanguage}
-                disabled={isGenerating}
-              />
-            </div>
+           {/* Code Editor */}
+<div
+  className="overflow-hidden"
+  style={{
+    flex: "1 1 auto",
+    minHeight: 0,
+    maxHeight: "calc(100vh - 230px)",
+  }}
+>
+  <CodeEditor
+    code={code}
+    language={language}
+    onCodeChange={setCode}
+    onLanguageChange={setLanguage}
+    disabled={isGenerating}
+  />
+</div>
 
-            {/* Generate Button */}
-            <div
-              className="p-3 flex-shrink-0"
-              style={{ borderTop: "1px solid var(--border)" }}
-            >
-              <button
-                onClick={handleGenerate}
-                disabled={isGenerating || !code.trim()}
-                className="w-full py-3 rounded-xl font-bold text-sm transition-all duration-300"
+           {/* Generate Button */}
+<div
+  className="p-2 flex-shrink-0"
+  style={{ borderTop: "1px solid var(--border)" }}
+>
+  <button
+    onClick={handleGenerate}
+    disabled={isGenerating || !code.trim()}
+    className="w-full py-2 rounded-lg font-bold text-xs transition-all duration-300"
                 style={{
                   background:
                     isGenerating || !code.trim()
@@ -603,9 +639,7 @@ export default function VisualizerPage() {
                     <span
                       className="text-sm"
                       style={{
-                        color: showError
-                          ? "#fb7185"
-                          : "var(--text-secondary)",
+                        color: showError ? "#fb7185" : "var(--text-secondary)",
                       }}
                     >
                       {stageLabel}
@@ -620,6 +654,56 @@ export default function VisualizerPage() {
                     )}
                   </div>
                 </div>
+
+                                {!showError && (
+                  <div
+                    className="mt-4 px-4 py-3 rounded-xl text-center mx-auto"
+                    style={{
+                      maxWidth: "440px",
+                      background: "rgba(99, 179, 237, 0.06)",
+                      border: "1px solid rgba(99, 179, 237, 0.18)",
+                    }}
+                  >
+                    <div
+                      style={{
+                        color: "var(--accent)",
+                        fontWeight: 700,
+                        fontSize: "13px",
+                        marginBottom: "6px",
+                      }}
+                    >
+                      {waitMessages[waitMsgIndex]}
+                    </div>
+
+                    <div
+                      style={{
+                        fontSize: "11px",
+                        color: "var(--text-muted)",
+                        marginBottom: "10px",
+                        lineHeight: 1.5,
+                      }}
+                    >
+                      ⏱️ This usually takes <b>1 to 2 minutes</b>.<br />
+                      Please don&apos;t refresh — your visualization is being built.
+                    </div>
+
+                    <div className="flex items-center justify-center gap-1">
+                      {[0, 1, 2, 3, 4].map((i) => (
+                        <span
+                          key={i}
+                          style={{
+                            width: "8px",
+                            height: "8px",
+                            borderRadius: "50%",
+                            background: "var(--accent)",
+                            opacity: 0.85,
+                            animation: `dotPulse 1.2s ${i * 0.15}s infinite ease-in-out`,
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 {/* Animated Icon */}
                 {showProgress && (
@@ -682,12 +766,37 @@ export default function VisualizerPage() {
               </div>
             )}
 
-            {/* Preview Frame */}
+            {/* Preview Frame — Card Style */}
             {showPreview && (
-              <div   className="flex-1 relative"
-                      style={{ minWidth: 0, minHeight: 0, overflow: "auto" }}>
+              <div
+                className="flex-1 relative overflow-auto"
+                style={{
+                  padding: "24px",
+                  background: "var(--bg-primary)",
+                }}
+              >
                 {hasVisualization ? (
-                  <PreviewFrame html={generatedHTML} loading={false} error="" />
+                  <div
+                    className="relative mx-auto"
+                    style={{
+                      width: "100%",
+                      maxWidth: "1400px",
+                      height: "calc(100vh - 180px)",
+                      minHeight: "600px",
+                      borderRadius: "16px",
+                      overflow: "hidden",
+                      boxShadow:
+                        "0 25px 80px rgba(0, 0, 0, 0.6), 0 0 60px rgba(99, 179, 237, 0.15)",
+                      border: "1px solid rgba(99, 179, 237, 0.2)",
+                      background: "#0d1117",
+                    }}
+                  >
+                    <PreviewFrame
+                      html={generatedHTML}
+                      loading={false}
+                      error=""
+                    />
+                  </div>
                 ) : (
                   /* Empty State */
                   <div className="flex-1 flex flex-col items-center justify-center h-full p-8">
@@ -709,9 +818,7 @@ export default function VisualizerPage() {
                       The AI will create a cinematic, interactive visualization
                       with characters, animations, and educational captions.
                     </p>
-                    <div
-                      className="flex flex-wrap items-center justify-center gap-2"
-                    >
+                    <div className="flex flex-wrap items-center justify-center gap-2">
                       {[
                         "Bubble Sort",
                         "Binary Search",
@@ -737,28 +844,109 @@ export default function VisualizerPage() {
                 )}
               </div>
             )}
-          </div>
-        </div>
+            {/* Floating Save Button when preview is shown */}
+            {generatedHTML && !showProgress && (
+              <div className="fixed bottom-6 right-6 z-50 flex gap-2">
+                <button
+                  onClick={handleSave}
+                  disabled={saving || saved}
+                  className="px-4 py-3 rounded-xl font-bold text-xs transition-all duration-300"
+                  style={{
+                    background: saved
+                      ? "rgba(104, 211, 145, 0.2)"
+                      : "var(--accent)",
+                    color: saved ? "#68d391" : "#0d1117",
+                    fontFamily: "Orbitron, sans-serif",
+                    boxShadow: "0 8px 32px rgba(99, 179, 237, 0.4)",
+                  }}
+                >
+                  {saved ? "✅ Saved" : saving ? "Saving..." : "💾 Save"}
+                </button>
+                <button
+                  onClick={handleGenerate}
+                  className="px-4 py-3 rounded-xl font-bold text-xs transition-all duration-300"
+                  style={{
+                    background: "rgba(159, 122, 234, 0.9)",
+                    color: "#0d1117",
+                    fontFamily: "Orbitron, sans-serif",
+                    boxShadow: "0 8px 32px rgba(159, 122, 234, 0.4)",
+                  }}
+                >
+                  🔄 Regenerate
+                </button>
+              </div>
+            )}
 
-        {/* ═══════════════════════════════════════════
+            {/* ═══════════════════════════════════════════
+            FLOATING SAVE + REGENERATE
+        ═══════════════════════════════════════════ */}
+            {generatedHTML && !showProgress && (
+              <div
+                className="fixed z-50 flex gap-3"
+                style={{
+                  bottom: "24px",
+                  right: "24px",
+                }}
+              >
+                <button
+                  onClick={handleSave}
+                  disabled={saving || saved}
+                  className="px-4 py-3 rounded-xl font-bold text-xs transition-all duration-300"
+                  style={{
+                    background: saved
+                      ? "rgba(104, 211, 145, 0.2)"
+                      : "var(--accent)",
+                    color: saved ? "#68d391" : "#0d1117",
+                    border: saved
+                      ? "1px solid rgba(104, 211, 145, 0.4)"
+                      : "none",
+                    fontFamily: "Orbitron, sans-serif",
+                    boxShadow: saved
+                      ? "0 8px 24px rgba(104, 211, 145, 0.3)"
+                      : "0 8px 32px rgba(99, 179, 237, 0.4)",
+                    letterSpacing: "0.06em",
+                  }}
+                >
+                  {saved ? "✅ Saved" : saving ? "Saving..." : "💾 Save"}
+                </button>
+
+                <button
+                  onClick={handleGenerate}
+                  disabled={isGenerating}
+                  className="px-4 py-3 rounded-xl font-bold text-xs transition-all duration-300"
+                  style={{
+                    background: "linear-gradient(135deg, #9f7aea, #ed64a6)",
+                    color: "#0d1117",
+                    fontFamily: "Orbitron, sans-serif",
+                    boxShadow: "0 8px 32px rgba(159, 122, 234, 0.4)",
+                    letterSpacing: "0.06em",
+                  }}
+                >
+                  🔄 Regenerate
+                </button>
+              </div>
+            )}
+
+            {/* ═══════════════════════════════════════════
             FLOATING EDIT CODE BUTTON (when collapsed)
         ═══════════════════════════════════════════ */}
-        {codeCollapsed && (
-          <button
-            onClick={() => setCodeCollapsed(false)}
-            className="fixed bottom-6 left-6 px-4 py-3 rounded-xl font-bold text-xs transition-all duration-300 z-50"
-            style={{
-              background:
-                "linear-gradient(135deg, var(--accent), #9f7aea)",
-              color: "#0d1117",
-              fontFamily: "Orbitron, sans-serif",
-              boxShadow: "0 8px 32px rgba(99, 179, 237, 0.4)",
-              letterSpacing: "0.06em",
-            }}
-          >
-            ◀ Edit Code
-          </button>
-        )}
+            {codeCollapsed && (
+              <button
+                onClick={() => setCodeCollapsed(false)}
+                className="fixed bottom-6 left-6 px-4 py-3 rounded-xl font-bold text-xs transition-all duration-300 z-50"
+                style={{
+                  background: "linear-gradient(135deg, var(--accent), #9f7aea)",
+                  color: "#0d1117",
+                  fontFamily: "Orbitron, sans-serif",
+                  boxShadow: "0 8px 32px rgba(99, 179, 237, 0.4)",
+                  letterSpacing: "0.06em",
+                }}
+              >
+                ◀ Edit Code
+              </button>
+            )}
+          </div>
+        </div>
       </div>
     </main>
   );

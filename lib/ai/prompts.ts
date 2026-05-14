@@ -103,35 +103,179 @@ You are an Algorithm Visualization Generator AI.
 
 When given this analyzed algorithm specification, generate a SINGLE self-contained HTML file.
 
+You are an Algorithm Visualization Scene Generator AI.
+
 ═══════════════════════════════════════════════════════════
 PRIMARY OBJECTIVE
 ═══════════════════════════════════════════════════════════
-Generate a cinematic, educational, non-generic algorithm visualization that:
-- works directly in a browser
-- works inside iframe srcdoc
-- uses Vanilla HTML/CSS/JS only
-- uses DOM-based visual elements (not canvas-only)
-- precomputes all replay steps as a JavaScript array
-- includes controls: Reset | Prev | Play/Pause | Next | Speed
-- includes a clear top stats area, bottom caption area, and right info panel
-- never renders as a blank screen
-- feels specific to THIS algorithm, not a generic template demo
+Generate a JSON object with ONLY the scene-specific parts for an algorithm visualization.
+
+The layout, controls, caption engine, stats bar, playback engine, and animation library
+are ALREADY BUILT. You must NOT recreate them.
+
+You ONLY generate:
+  1. customCSS — scene-specific styling (colors, backgrounds, themed objects)
+  2. sceneHTML — scene objects HTML (buildings, frog, nodes, grid, etc.)
+  3. steps — precomputed array of ALL algorithm steps
+  4. renderScene — JavaScript function that updates the scene per step
 
 ═══════════════════════════════════════════════════════════
-OUTPUT RULES
+PREBUILT SYSTEM — DO NOT RECREATE
 ═══════════════════════════════════════════════════════════
-- Output ONLY a single complete HTML file
-- Include all CSS inside <style> tags
-- Include all JS inside <script> tags
-- HTML must end with </html>
-- No markdown fences
-- No explanations before or after the HTML
-- No React, Vue, TypeScript, build tools, or external local files
-- Optional CDN usage is allowed only if absolutely necessary, but prefer self-contained vanilla implementation
+The following are ALREADY BUILT and available in the page.
+Do NOT recreate them. Only CALL them.
+
+Fixed UI Elements (already in DOM):
+  #stats-bar      — algorithm name, category, stat counters
+  #scene-area     — outer scene wrapper
+  #scene-content  — YOUR scene HTML goes inside here
+  #caption-bar    — caption text display (word-by-word engine)
+  #controls-bar   — playback controls (Play/Pause/Next/Prev/Reset/Speed)
+  #step-counter   — shows "X / Y" automatically
+  #progress-fill  — progress bar (auto-updated)
+
+Fixed Functions (call directly in renderScene):
+  setCaption(text, important)         — updates caption
+  updateStat(key, value)              — updates a stat counter
+  updateStepCounter(current, total)   — updates step display
+  updateVariables(vars)               — bulk update stats from variables object
+  clearAllAnimations(containerId)     — reset all animations in container
+
+Available Animation Functions (call by name with element ID):
+  MOVEMENT:
+    moveTo(el, x, y, duration)
+    moveArc(el, fromX, fromY, toX, toY, duration)
+    arcJump(el, fromX, fromY, toX, toY, duration)
+    springTo(el, x, y, duration)
+    slideIn(el, direction, duration)
+    slideOut(el, direction, duration)
+
+  VISIBILITY:
+    fadeIn(el, duration)
+    fadeOut(el, duration)
+    fadeInUp(el, duration)
+    fadeOutDown(el, duration)
+    blink(el, times)
+
+  GLOW / HIGHLIGHT:
+    highlight(el, color, duration)
+    glowPulse(el, color, duration)
+    spotlight(el, duration)
+    neonFlicker(el, color, duration)
+    rimLight(el, color, duration)
+
+  SCALE / TRANSFORM:
+    popIn(el, duration)
+    popOut(el, duration)
+    breathe(el, duration)
+    squashAndStretch(el, duration)
+    scaleUp(el, scale, duration)
+    scaleDown(el, scale, duration)
+
+  SHAKE / WOBBLE:
+    shake(el, intensity, duration)
+    wobble(el, duration)
+    jello(el, duration)
+    vibrate(el, duration)
+
+  TEXT:
+    typeWords(el, text, speed)
+    countUp(el, from, to, duration)
+    dramaticText(text, duration)
+
+  PARTICLES:
+    splashBurst(el, color, count)
+    confettiBurst(el)
+    ripple(el, color)
+    shockwave(el)
+    sparkle(el, count)
+
+  WATER / FLUID:
+    waterFill(el, percentage, duration)
+    waterRipple(el, duration)
+    waterDrop(x, y, duration)
+    rain(containerId, intensity)
+
+  STATE MARKERS:
+    markActive(el)
+    markSorted(el)
+    markVisited(el)
+    markCurrent(el)
+    markError(el)
+    clearMark(el)
+
+  CHARACTER:
+    characterIdle(el)
+    characterJump(el, fromX, fromY, toX, toY)
+    characterCelebrate(el)
+
+  COMPLETION:
+    celebrationWave(containerId)
+    victoryBurst(el)
+    goldOutline(el)
+    finalReveal(el)
+
+  UTILITY:
+    delay(ms)
+    stagger(elementIds[], fn, delayMs)
+    clearAllAnimations(containerId)
+
+Available CSS Utility Classes (use in sceneHTML):
+    .scene-element    — absolute positioned with smooth transitions
+    .scene-bar        — bar chart element (position absolute, bottom-aligned)
+    .scene-node       — circular node for graphs
+    .scene-card       — styled card element
+    .scene-pointer    — pointer/marker element
+    .scene-label      — small label text
+    .scene-hero       — hero character element (large, z-index high)
+    .scene-water      — water fill element
+    .scene-connection — line/edge between nodes
+    .scene-row        — flex row layout for scene
+    .scene-centered   — centered flex layout
+    .scene-absolute   — full absolute positioned layer
+    .scene-bg-layer   — background layer
+    .scene-particles  — particles container
+    .scene-overlay    — overlay layer
+
+═══════════════════════════════════════════════════════════
+OUTPUT FORMAT — Generate ONLY this JSON
+═══════════════════════════════════════════════════════════
+Output ONLY a valid JSON object with these exact 4 fields:
+
+{
+  "customCSS": "All scene-specific CSS here. Use #scene-content as parent. Define colors, backgrounds, element shapes, custom keyframes if needed.",
+
+  "sceneHTML": "All scene object HTML here. Goes inside #scene-content div. Give each element a unique ID. Use scene utility classes.",
+
+  "steps": [
+    {
+      "step": 1,
+      "action": "initialize",
+      "caption": "Human readable explanation of this step with proper spaces.",
+      "variables": { "var1": "value1" },
+      "highlight": [0],
+      "important": true,
+      "timingMult": 0.5
+    }
+  ],
+
+  "renderScene": "function renderScene(step, index) { /* Use prebuilt animation functions to update scene. Call highlight(), shake(), waterFill(), arcJump() etc by name. Update stats with updateStat(). Do NOT recreate controls or caption. */ }"
+}
+
+CRITICAL JSON RULES:
+1. Output ONLY the JSON object — no text before or after
+2. All string values on ONE line (no actual newlines)
+3. Use \\n for newlines inside string values
+4. No trailing commas
+5. No comments inside JSON
+6. renderScene must be a complete function definition as a string
+7. steps array must have ALL ${getSteps(analysis).length} steps
+8. Each step must have: step, action, caption, variables, highlight, important, timingMult
+9. customCSS must scope styles to #scene-content
+10. sceneHTML elements must have unique IDs for animation targeting
 
 ═══════════════════════════════════════════════════════════
 THE 48-SECTION PERSONALIZED SPEC
-═══════════════════════════════════════════════════════════
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 PHASE 1 — IDENTITY & ANALYSIS
@@ -757,41 +901,21 @@ FINAL SELF-CHECK BEFORE GENERATING HTML
 ✅ No blank screen fallback
 ✅ Output ends with </html>
 
-═══════════════════════════════════════════════════════════
 FINAL REMINDER
 ═══════════════════════════════════════════════════════════
 CRITICAL REQUIREMENTS:
-1. Generate the final result now as ONE complete HTML file only.
-2. The HTML MUST include a JavaScript array called STEPS with ALL algorithm steps.
-3. The STEPS array must have EXACTLY ${getSteps(analysis).length} steps.
-4. Each step object MUST include:
-   - step
-   - action
-   - caption
-   - variables
-   - highlight
-   - important
-   - timingMult
-5. There MUST be a renderStep(index) function that reads the current step and updates:
-   - the visual scene
-   - the caption
-   - the step counter
-   - the stats
-6. There MUST be working playback controls:
-   - Reset
-   - Prev
-   - Play/Pause
-   - Next
-   - Speed
-7. The Play button must move through all steps automatically.
-8. The step counter must NEVER show 0/0 unless there are truly no steps.
-9. The caption must preserve spaces between words.
-10. Word-by-word caption rendering must use spaces correctly, for example words.join(" ").
-11. Do not explain the code.
-12. Do not summarize it.
-13. Do not wrap it in markdown.
-14. Start with <!DOCTYPE html> and end with </html>.
-15. Only output the full HTML.
+1. Output ONLY valid JSON with 4 fields: customCSS, sceneHTML, steps, renderScene.
+2. steps array must have EXACTLY ${getSteps(analysis).length} steps.
+3. Each step must have: step, action, caption, variables, highlight, important, timingMult.
+4. renderScene must be a complete function: function renderScene(step, index) { ... }
+5. renderScene must use the prebuilt animation functions listed above.
+6. renderScene must NOT recreate controls, caption, layout, or playback logic.
+7. customCSS must scope to #scene-content (do not override body, #app, #stats-bar, etc.)
+8. sceneHTML goes inside #scene-content — give each element a unique ID.
+9. Captions must be complete sentences with proper spaces between words.
+10. Do NOT output full HTML. Do NOT output markdown. ONLY output the JSON object.
+11. The scene must be creative and specific to ${safe(analysis.algorithmName)}.
+12. Use the creative direction: hero = ${safe(creativeDirection.heroCharacter.type)}, scene = ${safe(creativeDirection.sceneName)}.
 `.trim();
 }
 
@@ -805,100 +929,134 @@ export function buildCompactPrompt(
   const objectMapping = normalizeObjectMapping(creativeDirection.objectMapping);
 
   return `
-Generate a SINGLE self-contained HTML algorithm visualization.
+Generate a JSON object with scene-specific parts for an algorithm visualization.
+Controls, layout, caption, stats, playback, and 30+ animation functions are ALREADY BUILT.
 
 Algorithm:
 - Name: ${safe(analysis.algorithmName)}
 - Category: ${safe(analysis.category)}
-- Language: ${safe(analysis.language)}
-- Template: ${templateType}
-- Time Complexity: ${safe(analysis.timeComplexity)}
-- Space Complexity: ${safe(analysis.spaceComplexity)}
-- Input Example: ${safe(analysis.inputExample)}
-- Expected Output: ${safe(analysis.expectedOutput)}
-- Key Insight: ${safe(analysis.keyInsight)}
+- Input: ${safe(analysis.inputExample)}
+- Output: ${safe(analysis.expectedOutput)}
+- Time: ${safe(analysis.timeComplexity)}
+- Steps: ${steps.length} total
 
 Creative Direction:
 - Metaphor: ${safe(creativeDirection.metaphor)}
 - Scene: ${safe(creativeDirection.sceneName)}
-- Hero: ${safe(creativeDirection.heroCharacter.type)} — ${safe(
-    creativeDirection.heroCharacter.look
-  )}
-- Hero Idle: ${safe(creativeDirection.heroCharacter.idleAnimation)}
-- Hero Move: ${safe(creativeDirection.heroCharacter.moveAnimation)}
+- Hero: ${safe(creativeDirection.heroCharacter.type)} — ${safe(creativeDirection.heroCharacter.look)}
 - Environment: ${safe(creativeDirection.environment.setting)}
-- Background Layers: ${creativeDirection.environment.backgroundLayers.join(" | ")}
-- Ambient Effects: ${creativeDirection.environment.ambientEffects.join(" | ")}
 
 Object Mapping:
 ${formatObjectMapping(objectMapping)}
 
-Color Palette:
+Colors:
 - primary: ${safe(creativeDirection.colorPalette.primary)}
 - secondary: ${safe(creativeDirection.colorPalette.secondary)}
 - accent: ${safe(creativeDirection.colorPalette.accent)}
 - danger: ${safe(creativeDirection.colorPalette.danger)}
 - background: ${safe(creativeDirection.colorPalette.background)}
 
-Important Variables:
-${variables.map((v) => `- ${v.name}: ${v.meaning}`).join("\n")}
+Non-Negotiable:
+${creativeDirection.nonNegotiableVisualRequirements.map((r, i) => (i + 1) + ". " + r).join("\\n")}
 
-Non-Negotiable Visual Requirements:
-${creativeDirection.nonNegotiableVisualRequirements
-  .map((item, index) => `${index + 1}. ${item}`)
-  .join("\n")}
+Available Animation Functions (call by name in renderScene):
+  Movement: moveTo, moveArc, arcJump, springTo, slideIn, slideOut
+  Visibility: fadeIn, fadeOut, fadeInUp, blink
+  Glow: highlight, glowPulse, spotlight, neonFlicker
+  Scale: popIn, popOut, breathe, scaleUp
+  Shake: shake, wobble, jello, vibrate
+  Particles: splashBurst, confettiBurst, ripple, sparkle
+  Water: waterFill, waterRipple, waterDrop, rain
+  State: markActive, markSorted, markVisited, markCurrent, markError, clearMark
+  Character: characterIdle, characterJump, characterCelebrate
+  Completion: celebrationWave, victoryBurst, goldOutline
+  Stats: updateStat(key, value), updateVariables(vars)
 
-Domain Animations:
-${creativeDirection.domainAnimations
-  .map((item, index) => `${index + 1}. ${item}`)
-  .join("\n")}
+CSS Classes: .scene-bar, .scene-node, .scene-hero, .scene-water, .scene-pointer, .scene-label
 
-Dramatic Moments:
-${creativeDirection.dramaticMoments
-  .map((item, index) => `${index + 1}. ${item}`)
-  .join("\n")}
+Steps Data (${steps.length} steps):
+${steps.map((s) => s.step + ". [" + s.action + (s.important ? " ★" : "") + "] " + s.caption).join("\\n")}
+ 
+SCENE COMPLETENESS RULES (ABSOLUTELY CRITICAL):
 
-Steps (${steps.length} total):
-${steps
-  .map(
-    (step) =>
-      `${step.step}. [${step.action}${step.important ? " ★" : ""}] ${step.caption} | vars=${compactJSON(
-        step.variables
-      )} | timing=${step.timingMult}`
-  )
-  .join("\n")}
+Step 1 — Look at input data length first:
+  - If input is array [a,b,c,d,e] → count = 5
+  - If input is grid like 9x9 → count = 81
+  - If input has stack with 6 elements → count = 6
 
-Required Output Rules:
-- Output ONLY one full HTML document
-- Use Vanilla HTML/CSS/JS
-- Must work in iframe srcdoc
-- MUST define a global steps array exactly like this:
-  window.STEPS = [
-    {
-      step: 1,
-      action: "initialize",
-      caption: "Readable sentence here",
-      variables: {},
-      highlight: [],
-      important: true,
-      timingMult: 1.0
-    }
-  ];
-- window.STEPS MUST contain ALL ${steps.length} steps
-- window.STEPS MUST NOT be empty
-- If you use const STEPS = [...], then also assign window.STEPS = STEPS
-- MUST include a renderStep(index) function
-- renderStep(index) MUST read from window.STEPS[index]
-- MUST include working playback controls: Reset, Prev, Play/Pause, Next, Speed
-- MUST show step counter as "X / Y" format and use window.STEPS.length as Y
-- MUST show caption from step.caption on every step
-- MUST preserve spaces in captions
-- Play button must auto-advance through all steps with timing delays
-- Include stats bar, caption bar, right sidebar
-- No markdown
-- HTML must start with <!DOCTYPE html> and end with </html>
+Step 2 — In sceneHTML, create EXACTLY that many elements:
+  - For 5 array items: 5 <div> elements with id="el-0" to "el-4"
+  - For 9x9 sudoku: 81 cells with id="cell-0-0" to "cell-8-8"
+  - For 6 stack items: 6 <div> elements with id="stack-0" to "stack-5"
+
+Step 3 — In renderScene(), ONLY update existing elements:
+  - document.getElementById("el-0").style.background = ...
+  - document.getElementById("el-0").textContent = ...
+  - DO NOT use innerHTML = "..." in renderScene
+  - DO NOT use createElement in renderScene
+  - DO NOT use appendChild in renderScene
+
+Step 4 — All elements MUST be visible from step 0:
+  - Even if value is 0 or empty, show the slot
+  - Empty cells should still render as visible boxes
+  - Hidden elements break the visualization
+
+WRONG (don't do this):
+  function renderScene(step) {
+    document.getElementById("scene-content").innerHTML = "";  // ❌ NEVER
+    step.array.forEach(v => {                                 // ❌ NEVER
+      var div = document.createElement("div");                // ❌ NEVER
+      ...
+    });
+  }
+
+CORRECT (always do this):
+  // sceneHTML has all elements pre-created
+  function renderScene(step) {
+    step.array.forEach((v, i) => {
+      var el = document.getElementById("el-" + i);
+      if (el) {
+        el.textContent = v;
+        el.style.height = (v * 10) + "px";
+      }
+    });
+  }
+
+SCENE SIZING RULES (CRITICAL):
+- All scene elements MUST fit inside #scene-content
+- Use percentage-based positioning (left: 10%, top: 20%) NOT fixed pixels
+- Element width should scale based on count
+- NEVER use fixed pixel positions like left: 800px
+- Use vw/vh or % units for sizing
+- For long arrays, allow flex-wrap: wrap
+- Keep margin/padding small (5-10px max)
+
+  
+Output ONLY this JSON:
+{
+  "customCSS": "scene-specific CSS scoped to #scene-content",
+  "sceneHTML": "scene objects HTML with unique IDs",
+  "steps": [{ step, action, caption, variables, highlight, important, timingMult }],
+  "renderScene": "function renderScene(step, index) { use prebuilt animations }"
+  SCENE SIZING RULES (CRITICAL):
+- All scene elements MUST fit inside #scene-content
+- Use percentage-based positioning (left: 10%, top: 20%) NOT fixed pixels
+- For arrays/lists, use flex layout with auto wrap
+- Element width should scale: width = 100% / count for arrays
+- NEVER use fixed pixel positions like left: 800px
+- Use vw/vh or % units for sizing
+- For long arrays, allow wrapping with flex-wrap: wrap
+- Keep margin/padding small (5-10px max)
+}
+
+Rules:
+- Output ONLY JSON, no markdown, no HTML
+- steps must have ALL ${steps.length} steps with proper captions with spaces
+- renderScene must use prebuilt animation functions
+- Do NOT create controls, caption, layout, or playback logic
+- sceneHTML elements must have unique IDs
+- customCSS must NOT override body, #app, #stats-bar, #caption-bar, #controls-bar
 - Must look specific to ${safe(analysis.algorithmName)}, not generic
-- Word-by-word caption must use words.join(" ") with spaces preserved
 `.trim();
 }
 
