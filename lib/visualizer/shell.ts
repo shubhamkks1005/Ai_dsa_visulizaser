@@ -77,19 +77,52 @@ html, body {
   width: 100%;
   height: 100%;
   position: relative;
-  overflow: auto;
-  padding: 12px;
+  overflow-x: auto;
+  overflow-y: auto;
+  padding: 20px;
   box-sizing: border-box;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
+  color: #e2e8f0;
 }
 
-#scene-content > * {
-  max-width: 100%;
-  max-height: 100%;
+#scene-content,
+#scene-content * {
+  color: inherit;
+}
+
+#scene-content [data-value]:empty::after {
+  content: attr(data-value);
+  color: #e2e8f0;
+}
+
+#scene-content [data-label]:empty::after {
+  content: attr(data-label);
+  color: #e2e8f0;
+}
+
+/* Both horizontal and vertical scrollbars */
+#scene-content::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+#scene-content::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 5px;
+}
+
+#scene-content::-webkit-scrollbar-thumb {
+  background: rgba(99, 179, 237, 0.4);
+  border-radius: 5px;
+  border: 2px solid #0d1117;
+}
+
+#scene-content::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 179, 237, 0.6);
+}
+
+/* Corner where both scrollbars meet */
+#scene-content::-webkit-scrollbar-corner {
+  background: rgba(255, 255, 255, 0.05);
 }
 
 /* ═══════════════════════════════════════════════════
