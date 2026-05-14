@@ -46,7 +46,7 @@ export interface AnalyzerOutput {
 // ═══════════════════════════════════════════════════
 
 const GEMINI_MODELS = [
-  "gemini-2.5-flash",
+   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
 ] as const;
 
@@ -229,35 +229,6 @@ STRICT RULES
     - No comments
     - No single quotes for JSON strings
     - Return one valid parseable JSON object only
-    - Do not use template literals or multiline strings
-    - All array values must be simple strings or numbers
-    - caption field must be a short single-line string
-    - variables object must have simple key-value pairs only
-    - No nested arrays inside steps
-    - Entire output must be parseable by JSON.parse()
-12. Generate 20-35 steps for proper algorithm understanding.
-    More steps = better learning experience.
-    Don't combine too aggressively — keep important steps separate.
-13. Keep each step COMPACT:
-    - description: MAX 10 words
-    - caption: MAX 15 words
-    - variables: MAX 4 key-value pairs
-    - highlight: MAX 3 indices
-14. Do NOT create one step for every tiny loop iteration if repetitive.
-15. Combine repetitive similar operations into one meaningful educational step.
-16. Focus on key moments: initialize, compare, swap/update, phase change, completion.
-17. For backtracking/recursion: show important choices and backtracks only, keep captions short.
-18. CREATIVE DIRECTION must be concise:
-    - metaphor: MAX 15 words
-    - sceneName: MAX 4 words
-    - heroCharacter fields: MAX 8 words each
-    - environment.setting: MAX 20 words
-    - backgroundLayers: MAX 3 items, MAX 8 words each
-    - ambientEffects: MAX 3 items, MAX 5 words each
-    - objectMapping: MAX 6 keys, MAX 8 words per value
-    - domainAnimations: MAX 4 items, MAX 10 words each
-    - dramaticMoments: MAX 4 items, MAX 10 words each
-    - nonNegotiableVisualRequirements: MAX 4 items, MAX 12 words each
 `.trim();
 }
 // ═══════════════════════════════════════════════════
@@ -1064,28 +1035,17 @@ async function callGeminiOnce(
 ): Promise<AnalyzerOutput> {
   const client = new GoogleGenAI({ apiKey });
 
-  const isPro = model.includes("2.5-pro");
-
   const response = await client.models.generateContent({
     model,
-    contents: String(prompt),
+    contents: prompt,
     config: {
       temperature: 0.25,
       responseMimeType: "application/json",
       maxOutputTokens: MAX_OUTPUT_TOKENS,
-      ...(isPro ? {} : {
-        thinkingConfig: {
-          thinkingBudget: 0,
-        },
-      }),
     },
   });
-  const text = response.text;
 
-  // TEMP DEBUG — remove after fix
-console.log('[DEBUG Analyzer] Raw response length:', text?.length);
-console.log('[DEBUG Analyzer] First 500 chars:', text?.slice(0, 500));
-console.log('[DEBUG Analyzer] Last 200 chars:', text?.slice(-200));
+  const text = response.text;
 
   if (!text || !text.trim()) {
     throw new Error(`Empty response from Gemini model ${model}`);

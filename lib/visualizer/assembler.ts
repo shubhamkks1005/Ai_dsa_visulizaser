@@ -216,6 +216,21 @@ var steps = window.STEPS;
 var _userRenderScene = ${renderFn};
 
 function renderScene(step, index) {
+  // Always update caption first (independent of scene)
+  try {
+    if (step && step.caption && typeof setCaption === 'function') {
+      setCaption(step.caption, !!step.important);
+    }
+  } catch (_) {}
+
+  // Always update stats (independent of scene)
+  try {
+    if (step && step.variables && typeof updateVariables === 'function') {
+      updateVariables(step.variables);
+    }
+  } catch (_) {}
+
+  // Clear stale highlights
   try {
     var sc = document.getElementById('scene-content');
     if (sc) {
@@ -226,19 +241,16 @@ function renderScene(step, index) {
     }
   } catch (_) {}
 
-  try {
-    _userRenderScene(step, index);
-  } catch (e) {
-    console.warn('[RenderScene] Error at step ' + index + ':', e);
+  // Try AI render — wrap each operation safely
+  if (typeof _userRenderScene === 'function') {
     try {
-      if (step && step.variables && typeof updateVariables === 'function') {
-        updateVariables(step.variables);
-      }
-      if (step && step.caption && typeof setCaption === 'function') {
-        setCaption(step.caption, !!step.important);
-      }
-    } catch (_) {}
+      _userRenderScene(step, index);
+    } catch (e) {
+      console.warn('[RenderScene] Step ' + index + ' error (continuing):', e.message);
+      // Don't break — caption + stats already updated above
+    }
   }
+
 }
 `;
 
