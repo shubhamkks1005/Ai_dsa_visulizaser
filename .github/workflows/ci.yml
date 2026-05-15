@@ -1,0 +1,35 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build project
+        run: npm run build
+        env:
+          GEMINI_API_KEY: AIzaSyAYU9xMkXbxgZ5kVH08MjXOxmJzPsYpxTk
+          MONGODB_URI: mongodb+srv://shubhamkks1005_db_user:B2Wc9ZYDB6lpnI0x@cluster0.15xcklt.mongodb.net/?appName=Cluster0
+          NEXTAUTH_SECRET: 0175caf07472b16aa657ea795915660351a03ad344dd6d81859fad0a7ee910df
+          NEXTAUTH_URL: http://localhost:3000
